@@ -4,6 +4,11 @@ File selection uses GTK's native ``Gtk.FileDialog``. The dialog only collects
 values; all path validation and persistence is delegated to ``GameManager`` so
 the same rules apply to add and edit operations. Performance switches are
 included here but wrapper construction belongs to ``PerformanceManager``.
+
+Covers selected here are validated by ``CoverManager`` and copied into the
+application cache when the form is saved. The original image is only read.
+For a new game, the editor reserves the final game ID before saving so the
+cached cover filename already matches the persisted record.
 """
 
 from __future__ import annotations
@@ -19,13 +24,24 @@ from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
 
 from minimal_game_launcher.errors import LauncherError  # noqa: E402
 from minimal_game_launcher.models import Game, GameDraft, Platform  # noqa: E402
+from minimal_game_launcher.paths import covers_directory  # noqa: E402
+from minimal_game_launcher.services.cover_manager import CoverManager  # noqa: E402
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
 from minimal_game_launcher.services.performance_manager import (  # noqa: E402
     PerformanceManager,
 )
 from minimal_game_launcher.ui.cover import load_cover_texture  # noqa: E402
 
-_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.avif", "*.gif", "*.bmp")
+_IMAGE_PATTERNS = (
+    "*.png",
+    "*.PNG",
+    "*.jpg",
+    "*.JPG",
+    "*.jpeg",
+    "*.JPEG",
+    "*.webp",
+    "*.WEBP",
+)
 
 
 class GameEditorDialog(Adw.Dialog):
@@ -46,6 +62,7 @@ class GameEditorDialog(Adw.Dialog):
         game: Game | None = None,
         *,
         performance_manager: PerformanceManager | None = None,
+        cover_manager: CoverManager | None = None,
     ) -> None:
         super().__init__()
         self._parent_window = parent_window
@@ -53,13 +70,16 @@ class GameEditorDialog(Adw.Dialog):
         self._game = game
         self._performance_manager = performance_manager or PerformanceManager()
         self._availability = self._performance_manager.detect()
+        self._cover_manager = cover_manager or CoverManager(covers_directory())
         self._active_file_dialog: Gtk.FileDialog | None = None
         self._active_error: Adw.AlertDialog | None = None
 
         self._platform = game.platform if game else Platform.LINUX
         self._executable = game.executable if game else ""
         self._working_directory = game.working_directory if game else ""
-        self._cover_path = game.cover_path if game else None
+        self._stored_cover_path = game.cover_path if game else None
+        self._cover_path = self._stored_cover_path
+        self._pending_cover_source: Path | None = None
         self._gamemode_enabled = game.gamemode_enabled if game else True
         self._mangohud_enabled = game.mangohud_enabled if game else False
 
@@ -172,8 +192,9 @@ class GameEditorDialog(Adw.Dialog):
         cover_group = Adw.PreferencesGroup(
             title="Cover",
             description=(
-                "Optional. The selected image is referenced in place; the "
-                "launcher never copies or deletes cover files."
+                "Optional. Selected images are validated and copied into the "
+                "launcher cover cache on save. The original file is never "
+                "modified."
             ),
         )
         preferences.add(cover_group)
@@ -187,7 +208,7 @@ class GameEditorDialog(Adw.Dialog):
         self._cover_row.add_suffix(self._cover_preview)
 
         clear_cover = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
-        clear_cover.set_tooltip_text("Remove cover reference")
+        clear_cover.set_tooltip_text("Remove cover")
         clear_cover.set_valign(Gtk.Align.CENTER)
         clear_cover.connect("clicked", self._clear_cover)
         self._cover_row.add_suffix(clear_cover)
@@ -269,9 +290,19 @@ class GameEditorDialog(Adw.Dialog):
             )
 
     def _refresh_cover_row(self) -> None:
-        if self._cover_path:
-            self._cover_row.set_subtitle(self._cover_path)
-            texture = load_cover_texture(self._cover_path, 80, 104)
+        display_path = (
+            str(self._pending_cover_source)
+            if self._pending_cover_source is not None
+            else self._cover_path
+        )
+        if display_path:
+            if self._pending_cover_source is not None:
+                self._cover_row.set_subtitle(
+                    f"{display_path} (copied to the cache on save)"
+                )
+            else:
+                self._cover_row.set_subtitle(display_path)
+            texture = load_cover_texture(display_path, 80, 104)
             self._cover_preview.set_paintable(texture)
             self._cover_preview.set_visible(texture is not None)
         else:
@@ -415,27 +446,48 @@ class GameEditorDialog(Adw.Dialog):
         if not path:
             self._show_error("Only local cover files can be selected.")
             return
+        try:
+            self._cover_manager.inspect_file(path)
+        except LauncherError as error:
+            self._show_error(str(error))
+            return
         if load_cover_texture(path, 80, 104) is None:
             self._show_error(
-                "The selected cover could not be read as an image. "
-                "Choose a supported PNG, JPEG, WebP, AVIF, GIF, or BMP file."
+                "The selected cover could not be previewed. Choose another "
+                "PNG, JPEG, or WebP image."
             )
             return
+        self._pending_cover_source = Path(path)
         self._cover_path = path
         self._refresh_cover_row()
 
     def _clear_cover(self, _button: Gtk.Button) -> None:
+        self._pending_cover_source = None
         self._cover_path = None
         self._refresh_cover_row()
 
     def _on_save_clicked(self, _button: Gtk.Button) -> None:
+        game_id = self._game.id if self._game else self._manager.new_game_id()
+
+        cover_path = self._cover_path
+        newly_cached_cover: str | None = None
+        if self._pending_cover_source is not None:
+            try:
+                newly_cached_cover = self._cover_manager.import_local(
+                    game_id, self._pending_cover_source
+                )
+            except LauncherError as error:
+                self._show_error(str(error))
+                return
+            cover_path = newly_cached_cover
+
         draft = GameDraft(
             name=self._name_row.get_text(),
             platform=self._platform,
             executable=self._executable,
             working_directory=self._working_directory,
             launch_arguments=self._arguments_row.get_text(),
-            cover_path=self._cover_path,
+            cover_path=cover_path,
             gamemode_enabled=self._gamemode_row.get_active(),
             mangohud_enabled=self._mangohud_row.get_active(),
         )
@@ -443,13 +495,27 @@ class GameEditorDialog(Adw.Dialog):
             if self._game:
                 saved = self._manager.update_game(self._game.id, draft)
             else:
-                saved = self._manager.add_game(draft)
+                saved = self._manager.add_game(draft, game_id=game_id)
         except LauncherError as error:
+            if newly_cached_cover:
+                self._cover_manager.remove_cover(newly_cached_cover)
             self._show_error(str(error))
             return
         except OSError as error:
+            if newly_cached_cover:
+                self._cover_manager.remove_cover(newly_cached_cover)
             self._show_error(f"The game could not be saved: {error}")
             return
+
+        previous_cover = self._stored_cover_path
+        if (
+            previous_cover
+            and previous_cover != saved.cover_path
+            and self._cover_manager.is_cached_cover(previous_cover)
+        ):
+            # Only cache-owned files are deleted. Legacy external references
+            # and user-owned originals are left untouched.
+            self._cover_manager.remove_cover(previous_cover)
 
         self.emit("saved", saved)
         self.close()

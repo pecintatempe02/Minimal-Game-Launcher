@@ -11,6 +11,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from minimal_game_launcher.errors import LauncherError  # noqa: E402
 from minimal_game_launcher.models import Game  # noqa: E402
+from minimal_game_launcher.services.cover_manager import CoverManager  # noqa: E402
 from minimal_game_launcher.services.game_manager import (  # noqa: E402
     SORT_NAME,
     SORT_RECENT,
@@ -22,7 +23,13 @@ from minimal_game_launcher.services.launch_manager import (  # noqa: E402
 from minimal_game_launcher.services.performance_manager import (  # noqa: E402
     PerformanceManager,
 )
+from minimal_game_launcher.services.steamgriddb import (  # noqa: E402
+    SteamGridDBClient,
+)
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
+from minimal_game_launcher.ui.cover_selection_dialog import (  # noqa: E402
+    CoverSelectionDialog,
+)
 from minimal_game_launcher.ui.game_card import GameCard  # noqa: E402
 from minimal_game_launcher.ui.game_details_dialog import GameDetailsDialog  # noqa: E402
 from minimal_game_launcher.ui.game_editor_dialog import GameEditorDialog  # noqa: E402
@@ -43,15 +50,20 @@ class MainWindow(Adw.ApplicationWindow):
         launch_manager: LaunchManager,
         settings_store: SettingsStore,
         performance_manager: PerformanceManager,
+        cover_manager: CoverManager,
+        steamgriddb: SteamGridDBClient,
     ) -> None:
         super().__init__(application=application)
         self._manager = manager
         self._launch_manager = launch_manager
         self._settings_store = settings_store
         self._performance_manager = performance_manager
+        self._cover_manager = cover_manager
+        self._steamgriddb = steamgriddb
         self._active_editor: GameEditorDialog | None = None
         self._active_details: GameDetailsDialog | None = None
         self._active_settings: SettingsDialog | None = None
+        self._active_cover_dialog: CoverSelectionDialog | None = None
         self._active_alert: Adw.AlertDialog | None = None
         self._cards_by_id: dict[str, GameCard] = {}
 
@@ -261,10 +273,19 @@ class MainWindow(Adw.ApplicationWindow):
     def _show_details(self, game: Game) -> None:
         dialog = GameDetailsDialog(game)
         dialog.connect("launch-requested", self._on_details_launch_requested)
+        dialog.connect("cover-requested", self._on_details_cover_requested)
         dialog.connect("edit-requested", self._on_details_edit_requested)
         dialog.connect("remove-requested", self._on_details_remove_requested)
         self._active_details = dialog
         dialog.present(self)
+
+    def _on_details_cover_requested(
+        self, dialog: GameDetailsDialog, game: Game
+    ) -> None:
+        self._active_details = None
+        # The cover dialog is modal as well; wait for the details dialog to
+        # finish closing so GTK does not stack two dialogs at once.
+        GLib.idle_add(self._open_cover_dialog, game)
 
     def _on_details_launch_requested(
         self, dialog: GameDetailsDialog, game: Game
@@ -286,11 +307,85 @@ class MainWindow(Adw.ApplicationWindow):
         self._active_details = None
         GLib.idle_add(self._confirm_remove, game)
 
+    def _open_cover_dialog(self, game: Game) -> None:
+        # Re-read the game so the dialog sees a cover applied since the details
+        # view was opened.
+        current = self._manager.get_game(game.id)
+        if current is None:
+            self._toast("This game is no longer in the library")
+            return
+        dialog = CoverSelectionDialog(
+            self,
+            current,
+            self._cover_manager,
+            self._steamgriddb,
+            self._settings_store,
+        )
+        dialog.connect("cover-selected", self._on_cover_selected)
+        dialog.connect("cover-cleared", self._on_cover_cleared)
+        self._active_cover_dialog = dialog
+        dialog.present(self)
+
+    def _on_cover_selected(
+        self, dialog: CoverSelectionDialog, cover_path: str
+    ) -> None:
+        self._active_cover_dialog = None
+        game = dialog.game
+        previous_cover = game.cover_path
+        try:
+            updated = self._manager.set_cover(game.id, cover_path)
+        except LauncherError as error:
+            # The dialog already cached the image; do not leave an orphan when
+            # the database write fails.
+            self._cover_manager.remove_cover(cover_path)
+            self._show_error(str(error), heading="Cover could not be saved")
+            return
+        except Exception as error:
+            self._cover_manager.remove_cover(cover_path)
+            self._show_error(
+                f"The cover could not be saved: {error}",
+                heading="Cover could not be saved",
+            )
+            return
+
+        if (
+            previous_cover
+            and previous_cover != updated.cover_path
+            and self._cover_manager.is_cached_cover(previous_cover)
+        ):
+            self._cover_manager.remove_cover(previous_cover)
+
+        self._refresh_library()
+        self._toast(f"Updated cover for {updated.name}")
+
+    def _on_cover_cleared(self, dialog: CoverSelectionDialog) -> None:
+        self._active_cover_dialog = None
+        game = dialog.game
+        previous_cover = game.cover_path
+        try:
+            updated = self._manager.set_cover(game.id, None)
+        except LauncherError as error:
+            self._show_error(str(error), heading="Cover could not be removed")
+            return
+        except Exception as error:
+            self._show_error(
+                f"The cover could not be removed: {error}",
+                heading="Cover could not be removed",
+            )
+            return
+
+        if previous_cover and self._cover_manager.is_cached_cover(previous_cover):
+            self._cover_manager.remove_cover(previous_cover)
+
+        self._refresh_library()
+        self._toast(f"Removed cover for {updated.name}")
+
     def _open_add_dialog(self) -> None:
         dialog = GameEditorDialog(
             self,
             self._manager,
             performance_manager=self._performance_manager,
+            cover_manager=self._cover_manager,
         )
         dialog.connect("saved", self._on_game_saved)
         self._active_editor = dialog
@@ -302,6 +397,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._manager,
             game,
             performance_manager=self._performance_manager,
+            cover_manager=self._cover_manager,
         )
         dialog.connect("saved", self._on_game_saved)
         self._active_editor = dialog

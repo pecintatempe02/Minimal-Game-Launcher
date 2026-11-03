@@ -164,6 +164,17 @@ class Database:
             )
         return cursor.rowcount > 0
 
+    def update_cover(
+        self, game_id: str, cover_path: str | None, updated_at: str
+    ) -> bool:
+        """Update only a game's cover reference; return whether a row existed."""
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE games SET cover_path = ?, updated_at = ? WHERE id = ?",
+                (cover_path, updated_at, game_id),
+            )
+        return cursor.rowcount > 0
+
     def delete_game(self, game_id: str) -> bool:
         """Delete only the library row, never any external file.
 

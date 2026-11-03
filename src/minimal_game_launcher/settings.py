@@ -1,15 +1,16 @@
-"""Persistent launcher preferences, currently Wine executable selection.
+"""Persistent launcher preferences and optional API credentials.
 
-Settings are intentionally stored outside the SQLite library so that launch
-configuration is independent from game records. The JSON file is read before
-each Windows launch, which means changing Wine in the settings dialog takes
-effect immediately without restarting the application.
+Wine selection is stored as JSON outside the SQLite library so that launch
+configuration is independent from game records. The optional SteamGridDB API
+key is kept in a separate user-private file (mode ``0600``) and may also be
+supplied through ``STEAMGRIDDB_API_KEY``. Keys are never hardcoded.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -33,10 +34,20 @@ class LauncherSettings:
 
 
 class SettingsStore:
-    """Load and atomically save launcher settings as JSON."""
+    """Load and atomically save launcher settings and the optional API key."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        api_key_path: str | Path | None = None,
+    ) -> None:
         self.path = Path(path).expanduser()
+        self.api_key_path = (
+            Path(api_key_path).expanduser()
+            if api_key_path is not None
+            else self.path.parent / "steamgriddb.key"
+        )
 
     def load(self) -> LauncherSettings:
         """Return stored settings, falling back to safe defaults on errors."""
@@ -84,3 +95,56 @@ class SettingsStore:
             encoding="utf-8",
         )
         temporary.replace(self.path)
+
+    def load_api_key(self) -> str | None:
+        """Return the optional SteamGridDB key from its private file or env.
+
+        The private file takes precedence so a user can override an inherited
+        environment variable. Missing or unreadable credentials are treated as
+        "online search not configured"; they never prevent the app from
+        starting.
+        """
+        if self.api_key_path.is_file():
+            try:
+                key = self.api_key_path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                LOGGER.exception(
+                    "Could not read the SteamGridDB API key from %s",
+                    self.api_key_path,
+                )
+            else:
+                if key:
+                    return key
+
+        environment_key = os.environ.get("STEAMGRIDDB_API_KEY", "").strip()
+        return environment_key or None
+
+    def save_api_key(self, api_key: str | None) -> None:
+        """Store or remove the key in a mode-``0600`` file.
+
+        Empty input removes the file. The temporary file is created with
+        restricted permissions from the start so the key is never briefly
+        world-readable.
+        """
+        key = (api_key or "").strip()
+        if not key:
+            self.api_key_path.unlink(missing_ok=True)
+            return
+
+        self.api_key_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.api_key_path.with_name(
+            f"{self.api_key_path.name}.tmp"
+        )
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(f"{key}\n")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.api_key_path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+            raise

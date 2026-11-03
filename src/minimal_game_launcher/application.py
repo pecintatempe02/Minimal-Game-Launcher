@@ -17,15 +17,20 @@ from minimal_game_launcher import APP_ID  # noqa: E402
 from minimal_game_launcher.database import Database  # noqa: E402
 from minimal_game_launcher.logging_setup import configure_logging  # noqa: E402
 from minimal_game_launcher.paths import (  # noqa: E402
+    covers_directory,
     database_path,
     ensure_data_directory,
     prefixes_directory,
     settings_path,
 )
+from minimal_game_launcher.services.cover_manager import CoverManager  # noqa: E402
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
 from minimal_game_launcher.services.launch_manager import LaunchManager  # noqa: E402
 from minimal_game_launcher.services.performance_manager import (  # noqa: E402
     PerformanceManager,
+)
+from minimal_game_launcher.services.steamgriddb import (  # noqa: E402
+    SteamGridDBClient,
 )
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 from minimal_game_launcher.ui.main_window import MainWindow  # noqa: E402
@@ -46,6 +51,8 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._launch_manager: LaunchManager | None = None
         self._performance_manager: PerformanceManager | None = None
         self._settings_store: SettingsStore | None = None
+        self._cover_manager: CoverManager | None = None
+        self._steamgriddb: SteamGridDBClient | None = None
         self._window: MainWindow | None = None
 
     def do_startup(self) -> None:
@@ -60,6 +67,10 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._manager = GameManager(self._database, prefixes_directory())
         self._settings_store = SettingsStore(settings_path())
         self._performance_manager = PerformanceManager()
+        self._cover_manager = CoverManager(covers_directory())
+        # The client holds no API key: the key is read from local settings on
+        # each explicit search so it is never embedded in the composition root.
+        self._steamgriddb = SteamGridDBClient()
         # The launch manager reads settings before each Windows launch, so a
         # change in the settings dialog applies without restarting the app.
         self._launch_manager = LaunchManager(
@@ -78,12 +89,18 @@ class MinimalGameLauncherApplication(Adw.Application):
                 raise RuntimeError(
                     "Application started without performance detection."
                 )
+            if self._cover_manager is None or self._steamgriddb is None:
+                raise RuntimeError(
+                    "Application started without cover services."
+                )
             self._window = MainWindow(
                 self,
                 self._manager,
                 self._launch_manager,
                 self._settings_store,
                 self._performance_manager,
+                self._cover_manager,
+                self._steamgriddb,
             )
         self._window.present()
 

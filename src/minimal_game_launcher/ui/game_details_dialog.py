@@ -21,6 +21,7 @@ class GameDetailsDialog(Adw.Dialog):
 
     __gsignals__ = {
         "launch-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
+        "cover-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "edit-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "remove-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
     }
@@ -105,9 +106,21 @@ class GameDetailsDialog(Adw.Dialog):
 
         files = Adw.PreferencesGroup(title="Files")
         page.add(files)
-        self._add_value_row(
-            files, "Cover image", self._game.cover_path or "No cover"
+        cover_row = Adw.ActionRow(title="Cover image")
+        cover_row.set_subtitle(self._game.cover_path or "No cover")
+        cover_row.set_subtitle_selectable(True)
+        cover_row.set_activatable(True)
+        cover_row.connect(
+            "activated", lambda _row: self.emit("cover-requested", self._game)
         )
+        cover_button = Gtk.Button(label="Change")
+        cover_button.set_valign(Gtk.Align.CENTER)
+        cover_button.connect(
+            "clicked",
+            lambda _button: self.emit("cover-requested", self._game),
+        )
+        cover_row.add_suffix(cover_button)
+        files.add(cover_row)
         if self._game.platform is Platform.WINDOWS:
             self._add_value_row(
                 files,

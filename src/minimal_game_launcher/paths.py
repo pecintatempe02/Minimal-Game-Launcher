@@ -1,9 +1,10 @@
 """Resolve application-owned directories according to XDG conventions.
 
-The library database, launcher settings, per-game Wine prefixes, and diagnostic
-log are kept in separate XDG locations. Wine prefixes are located under the
-data directory but are created lazily by the launch manager on a Windows game's
-first launch. Cover files remain external user-owned references.
+The library database, launcher settings, per-game Wine prefixes, diagnostic
+log, cover cache, and optional SteamGridDB key are kept in separate XDG
+locations. Wine prefixes are located under the data directory but are created
+lazily by the launch manager on a Windows game's first launch. Covers copied
+into the cache are app-owned; the original user-selected images never are.
 """
 
 from __future__ import annotations
@@ -63,6 +64,24 @@ def config_directory() -> Path:
 def settings_path() -> Path:
     """Return the JSON settings file used for Wine selection."""
     return config_directory() / "settings.json"
+
+
+def steamgriddb_key_path() -> Path:
+    """Return the user-private file containing the optional SteamGridDB key.
+
+    The key is deliberately kept out of the JSON settings file so its
+    permissions can be restricted to the current user (mode ``0600``).
+    """
+    return config_directory() / "steamgriddb.key"
+
+
+def covers_directory() -> Path:
+    """Return the application-owned cache for copied and downloaded covers.
+
+    The directory is created lazily by ``CoverManager``; the launcher never
+    writes into the user's original image directory.
+    """
+    return data_directory() / "covers"
 
 
 def state_directory() -> Path:

@@ -1,8 +1,8 @@
 """GdkPixbuf-based cover loading helpers shared by GTK widgets.
 
-Covers are external files selected by the user. Loading failures are treated
-as a missing cover and fall back to a themed placeholder; the launcher never
-edits or deletes the source image.
+Covers may be cached files or legacy external references. Loading failures are
+treated as a missing cover and fall back to a themed placeholder; the launcher
+never edits or deletes user-owned source images.
 """
 
 from __future__ import annotations
@@ -31,5 +31,24 @@ def load_cover_texture(
             str(cover), width, height, True
         )
     except (GLib.Error, OSError):
+        return None
+    return Gdk.Texture.new_for_pixbuf(pixbuf)
+
+
+def load_cover_texture_from_bytes(data: bytes) -> Gdk.Texture | None:
+    """Decode in-memory image bytes for previews without writing a file."""
+    loader = GdkPixbuf.PixbufLoader()
+    try:
+        loader.write(data)
+        loader.close()
+        pixbuf = loader.get_pixbuf()
+    except GLib.Error:
+        return None
+    finally:
+        try:
+            loader.close()
+        except GLib.Error:
+            pass
+    if pixbuf is None:
         return None
     return Gdk.Texture.new_for_pixbuf(pixbuf)

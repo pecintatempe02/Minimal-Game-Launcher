@@ -1,9 +1,13 @@
-"""Launcher settings dialog for choosing the Wine executable.
+"""Launcher settings dialog for Wine and optional online cover search.
 
 Windows games can use Wine from ``PATH`` or a user-selected custom executable.
 File selection uses the native GTK file chooser. The dialog validates the
 custom path's existence and execute permission, then persists only settings;
 no Wine process is started from here.
+
+The optional SteamGridDB API key is entered in a password row and stored in a
+separate user-private file (mode ``0600``). Leaving it empty removes the file.
+The key is never written to the JSON settings file or source code.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ class SettingsDialog(Adw.Dialog):
         self._active_error: Adw.AlertDialog | None = None
 
         self.set_content_width(600)
-        self.set_content_height(420)
+        self.set_content_height(560)
         self.set_can_close(True)
         self.set_child(self._build_ui())
         self._refresh_custom_row()
@@ -100,6 +104,21 @@ class SettingsDialog(Adw.Dialog):
         choose.connect("clicked", self._choose_custom_wine)
         self._custom_row.add_suffix(choose)
         wine_group.add(self._custom_row)
+
+        cover_group = Adw.PreferencesGroup(
+            title="Online cover search",
+            description=(
+                "Optional. A SteamGridDB key enables cover searches from the "
+                "cover dialog. The key is stored in a private file readable "
+                "only by your user. Only the search text is sent to "
+                "SteamGridDB; executable paths and Wine prefixes never are."
+            ),
+        )
+        page.add(cover_group)
+
+        self._api_key_row = Adw.PasswordEntryRow(title="SteamGridDB API key")
+        self._api_key_row.set_text(settings_store.load_api_key() or "")
+        cover_group.add(self._api_key_row)
 
         return toolbar
 
@@ -190,6 +209,7 @@ class SettingsDialog(Adw.Dialog):
             custom_wine_path=custom_path,
         )
         try:
+            self._settings_store.save_api_key(self._api_key_row.get_text())
             self._settings_store.save(settings)
         except OSError as error:
             self._show_error(f"Settings could not be saved: {error}")

@@ -152,10 +152,25 @@ class GameManager:
             return None
         return existing or str(self._prefixes_root / game_id)
 
-    def add_game(self, draft: GameDraft) -> Game:
-        """Validate and insert a new library entry."""
+    @staticmethod
+    def new_game_id() -> str:
+        """Return a fresh ID for a game that has not been persisted yet.
+
+        The editor uses this to cache a cover under its final game ID before
+        the database row exists, so a cover import never needs a rename.
+        """
+        return str(uuid.uuid4())
+
+    def add_game(
+        self, draft: GameDraft, *, game_id: str | None = None
+    ) -> Game:
+        """Validate and insert a new library entry.
+
+        ``game_id`` is optional and intended for the editor's cover flow. When
+        omitted the manager generates a new identifier.
+        """
         normalized = self._normalize_draft(draft)
-        game_id = str(uuid.uuid4())
+        game_id = game_id or self.new_game_id()
         timestamp = _utc_now()
         game = Game(
             id=game_id,
@@ -213,6 +228,20 @@ class GameManager:
             raise GameNotFoundError("This game is no longer in the library.")
         self._database.delete_game(game_id)
         return existing
+
+    def set_cover(self, game_id: str, cover_path: str | None) -> Game:
+        """Update only the cover reference after the cache has accepted it.
+
+        File copying, validation, and cache deletion belong to ``CoverManager``;
+        this method persists the resulting path in SQLite.
+        """
+        existing = self._database.get_game(game_id)
+        if existing is None:
+            raise GameNotFoundError("This game is no longer in the library.")
+        updated_at = _utc_now()
+        if not self._database.update_cover(game_id, cover_path, updated_at):
+            raise GameNotFoundError("This game is no longer in the library.")
+        return replace(existing, cover_path=cover_path, updated_at=updated_at)
 
     def get_game(self, game_id: str) -> Game | None:
         """Return a single entry by ID."""

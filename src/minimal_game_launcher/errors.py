@@ -33,3 +33,35 @@ class PrefixInitializationError(LaunchError):
 
 class ProcessLaunchError(LaunchError):
     """Raised when the operating system refuses to create a process."""
+
+
+class CoverError(LauncherError):
+    """Base class for expected cover-management errors."""
+
+
+class CoverValidationError(CoverError):
+    """Raised when an image is not an acceptable cover."""
+
+
+class CoverCacheError(CoverError):
+    """Raised when a validated cover cannot be written to the cache."""
+
+
+class MetadataProviderError(LauncherError):
+    """Base class for optional online metadata failures."""
+
+
+class SteamGridDBError(MetadataProviderError):
+    """Raised for an invalid or failed SteamGridDB response."""
+
+
+class SteamGridDBAuthError(SteamGridDBError):
+    """Raised when SteamGridDB rejects the configured API key."""
+
+
+class SteamGridDBNotConfiguredError(SteamGridDBError):
+    """Raised when online cover search is used without an API key."""
+
+
+class SteamGridDBOfflineError(SteamGridDBError):
+    """Raised when SteamGridDB cannot be reached."""

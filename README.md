@@ -3,10 +3,11 @@
 A small GTK4/libadwaita game library and launcher for Linux, built with Python
 3, PyGObject, SQLite, and GdkPixbuf. It is designed for Arch Linux and Hyprland.
 
-This repository currently implements **Phase 4: performance integration**.
+This repository currently implements **Phase 5: cover management**.
 Games can be registered, edited, searched, sorted, launched, and removed.
 Windows games use per-game Wine prefixes; native games run directly. Optional
-GameMode and MangoHud wrappers are configured independently per game.
+GameMode and MangoHud wrappers are configured independently per game. Covers
+can be selected from local images or, optionally, found through SteamGridDB.
 
 ## Requirements
 
@@ -39,6 +40,10 @@ PYTHONPATH=src python3 -m minimal_game_launcher
   `$XDG_DATA_HOME/minigame-launcher/prefixes/{game-id}/`
   (normally `~/.local/share/minigame-launcher/prefixes/{game-id}/`).
 - Settings: `$XDG_CONFIG_HOME/minigame-launcher/settings.json`.
+- Optional SteamGridDB key:
+  `$XDG_CONFIG_HOME/minigame-launcher/steamgriddb.key` (mode `0600`).
+  The `STEAMGRIDDB_API_KEY` environment variable is used as a fallback.
+- Cover cache: `$XDG_DATA_HOME/minigame-launcher/covers/`.
 - Diagnostic log: `$XDG_STATE_HOME/minigame-launcher/launcher.log`.
 
 On startup, a Phase 2 database stored under the old
@@ -66,8 +71,8 @@ system files.
 - The working directory defaults to the executable's parent directory.
 - Launch arguments are parsed with `shlex.split` and passed as an argument list.
   No shell is used.
-- Cover images are external references selected through the native file chooser.
-  They are never copied or deleted by the launcher.
+- Cover images are validated and copied into the launcher's cover cache. The
+  original files are never modified or deleted. See **Covers** below.
 - GameMode and MangoHud are independent per-game toggles. New games default to
   GameMode enabled and MangoHud disabled.
 - Removing a game deletes only its SQLite record. The game directory,
@@ -135,3 +140,81 @@ is started.
 
 The launcher does not install DXVK, VKD3D, .NET, VC++ runtimes, GameMode,
 MangoHud, or other dependencies.
+
+## Covers
+
+Open a game's details and choose **Change** to open the cover dialog. Covers
+are never replaced automatically; a cover is applied only after you select it
+and press **Apply**. **Remove** clears the cover reference.
+
+### Local images
+
+- Accepted formats are PNG, JPEG, and WebP, as decoded by the installed
+  GdkPixbuf loaders.
+- The file is validated, then copied into the cover cache when you apply it.
+  The original image is only read and is never modified or deleted.
+- The game editor follows the same rule: a newly chosen cover is copied when
+  you save the game.
+
+### Image cache
+
+- Cached files live in `$XDG_DATA_HOME/minigame-launcher/covers/`, created
+  with private permissions.
+- Filenames combine the game ID with a random token and keep the detected
+  format suffix, for example `{game-id}-{token}.png`. Replacing a cover never
+  overwrites the previous file.
+- When a cover is replaced or removed, only the previous file inside the cache
+  is deleted. Legacy references to external files and any file outside the
+  cache are left untouched.
+- Writes go to a temporary file first and are then renamed into place.
+
+### Validation
+
+Every image, whether local or downloaded, must pass these checks:
+
+- Not empty and at most 10 MiB.
+- Decodable by GdkPixbuf.
+- Between 16×16 and 10000×10000 pixels.
+- Format is PNG, JPEG, or WebP. For downloads, the declared content type must
+  match the decoded format.
+
+### Online search (SteamGridDB, optional)
+
+- The provider is optional. Without a key, online search is disabled and local
+  images still work.
+- Get a key from SteamGridDB and enter it in **Settings → Online cover
+  search**. It is saved to `$XDG_CONFIG_HOME/minigame-launcher/steamgriddb.key`
+  with mode `0600`, separate from `settings.json`. Clearing the field deletes
+  the file.
+- `STEAMGRIDDB_API_KEY` is used only when no key file exists. Keys are never
+  hardcoded in the source.
+- Searches run only when you press **Search** in the cover dialog. The only
+  data sent is the search text. Executable paths, working directories, Wine
+  prefixes, and library records are never uploaded.
+- The key is sent in an `Authorization: Bearer` header to the SteamGridDB API
+  only. It is never sent to image CDN URLs.
+- Each search looks up up to 3 matching games, then lists up to 24 grid
+  results. Nothing is downloaded until you select a result, and the image is
+  downloaded only when you press **Apply**.
+- The preview loads one selected result's thumbnail. It is decoded in memory
+  and is not cached.
+
+### Error handling
+
+- Missing key: the dialog explains how to add one; no network request is made.
+- Offline or timeout: reported as a network problem. A search that fails
+  partway through is reported as an error, not as empty results.
+- Rejected key (HTTP 401/403): reported as an authentication error.
+- Rate limit (HTTP 429) and other HTTP errors: reported with the status code.
+- Non-JSON responses, unexpected content types, API `success: false` payloads,
+  and responses over 2 MiB are rejected.
+- Image responses over 10 MiB, or with an unsupported content type, are
+  rejected before validation.
+- Network work runs on worker threads and returns to the GTK main loop, so the
+  window stays responsive. Results from a superseded search or preview are
+  discarded.
+
+Tests in `tests/test_cover_manager.py`, `tests/test_steamgriddb.py`,
+`tests/test_settings.py`, and `tests/test_cover_integration.py` cover manual
+selection, cache behavior, invalid files, offline and API failures, and
+replacement. They use fake HTTP responses and never contact the network.
