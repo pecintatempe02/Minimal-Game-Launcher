@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Minimal Game Launcher
+Comment=Minimal GTK4 game library and launcher
+Exec=@EXEC@
+Icon=io.github.minimal_game_launcher.MinimalGameLauncher
+Terminal=false
+Categories=Game;Utility;
+Keywords=games;library;wine;launcher;
+StartupNotify=true
+StartupWMClass=io.github.minimal_game_launcher.MinimalGameLauncher
