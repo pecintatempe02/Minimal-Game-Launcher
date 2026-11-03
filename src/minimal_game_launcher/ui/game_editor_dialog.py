@@ -1,0 +1,413 @@
+"""Add/edit dialog for game metadata and launch configuration.
+
+File selection uses GTK's native ``Gtk.FileDialog``. The dialog only collects
+values; all path validation and persistence is delegated to ``GameManager`` so
+the same rules apply to add and edit operations.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+
+from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
+
+from minimal_game_launcher.errors import LauncherError  # noqa: E402
+from minimal_game_launcher.models import Game, GameDraft, Platform  # noqa: E402
+from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
+from minimal_game_launcher.ui.cover import load_cover_texture  # noqa: E402
+
+_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.avif", "*.gif", "*.bmp")
+
+
+class GameEditorDialog(Adw.Dialog):
+    """Collect and persist one game's metadata.
+
+    ``game`` is ``None`` for creation. The dialog emits ``saved`` with the
+    resulting domain object after ``GameManager`` accepts the data.
+    """
+
+    __gsignals__ = {
+        "saved": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
+    }
+
+    def __init__(
+        self,
+        parent_window: Gtk.Window,
+        manager: GameManager,
+        game: Game | None = None,
+    ) -> None:
+        super().__init__()
+        self._parent_window = parent_window
+        self._manager = manager
+        self._game = game
+        self._active_file_dialog: Gtk.FileDialog | None = None
+        self._active_error: Adw.AlertDialog | None = None
+
+        self._platform = game.platform if game else Platform.LINUX
+        self._executable = game.executable if game else ""
+        self._working_directory = game.working_directory if game else ""
+        self._cover_path = game.cover_path if game else None
+
+        self.set_content_width(620)
+        self.set_content_height(700)
+        self.set_can_close(True)
+        self.set_child(self._build_ui())
+        self._refresh_all_rows()
+
+    def _build_ui(self) -> Gtk.Widget:
+        header = Adw.HeaderBar()
+        header.set_title_widget(
+            Adw.WindowTitle(title="Edit game" if self._game else "Add game")
+        )
+
+        cancel = Gtk.Button(label="Cancel")
+        cancel.add_css_class("flat")
+        cancel.connect("clicked", lambda _button: self.close())
+        header.pack_start(cancel)
+
+        save = Gtk.Button(label="Save" if self._game else "Add")
+        save.add_css_class("suggested-action")
+        save.connect("clicked", self._on_save_clicked)
+        header.pack_end(save)
+
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(header)
+
+        preferences = Adw.PreferencesPage()
+        toolbar.set_content(preferences)
+
+        game_group = Adw.PreferencesGroup(title="Game")
+        preferences.add(game_group)
+
+        self._name_row = Adw.EntryRow(title="Game name")
+        if self._game:
+            self._name_row.set_text(self._game.name)
+        game_group.add(self._name_row)
+
+        self._platform_row = Adw.ComboRow(title="Platform")
+        self._platform_row.set_model(
+            Gtk.StringList.new(["Linux Native", "Windows / Wine"])
+        )
+        self._platform_row.set_selected(
+            1 if self._platform is Platform.WINDOWS else 0
+        )
+        self._platform_row.connect("notify::selected", self._on_platform_changed)
+        game_group.add(self._platform_row)
+
+        launch_group = Adw.PreferencesGroup(
+            title="Launch configuration",
+            description=(
+                "Arguments are validated with shell-like quoting, but games are "
+                "never launched through a shell."
+            ),
+        )
+        preferences.add(launch_group)
+
+        self._executable_row = Adw.ActionRow(title="Executable")
+        self._executable_row.set_subtitle_selectable(True)
+        self._executable_row.set_activatable(True)
+        self._executable_row.connect("activated", self._choose_executable)
+        choose_executable = Gtk.Button.new_from_icon_name("folder-open-symbolic")
+        choose_executable.set_tooltip_text("Choose executable")
+        choose_executable.set_valign(Gtk.Align.CENTER)
+        choose_executable.connect("clicked", self._choose_executable)
+        self._executable_row.add_suffix(choose_executable)
+        launch_group.add(self._executable_row)
+
+        self._working_directory_row = Adw.ActionRow(title="Working directory")
+        self._working_directory_row.set_subtitle_selectable(True)
+        self._working_directory_row.set_activatable(True)
+        self._working_directory_row.connect(
+            "activated", self._choose_working_directory
+        )
+        reset_directory = Gtk.Button.new_from_icon_name("edit-undo-symbolic")
+        reset_directory.set_tooltip_text("Use executable folder")
+        reset_directory.set_valign(Gtk.Align.CENTER)
+        reset_directory.connect("clicked", self._reset_working_directory)
+        self._working_directory_row.add_suffix(reset_directory)
+        choose_directory = Gtk.Button.new_from_icon_name("folder-open-symbolic")
+        choose_directory.set_tooltip_text("Choose working directory")
+        choose_directory.set_valign(Gtk.Align.CENTER)
+        choose_directory.connect("clicked", self._choose_working_directory)
+        self._working_directory_row.add_suffix(choose_directory)
+        launch_group.add(self._working_directory_row)
+
+        self._arguments_row = Adw.EntryRow(title="Launch arguments")
+        if self._game:
+            self._arguments_row.set_text(self._game.launch_arguments)
+        launch_group.add(self._arguments_row)
+
+        cover_group = Adw.PreferencesGroup(
+            title="Cover",
+            description=(
+                "Optional. The selected image is referenced in place; the "
+                "launcher never copies or deletes cover files."
+            ),
+        )
+        preferences.add(cover_group)
+
+        self._cover_row = Adw.ActionRow(title="Cover image")
+        self._cover_row.set_subtitle_selectable(True)
+
+        self._cover_preview = Gtk.Picture()
+        self._cover_preview.set_size_request(40, 52)
+        self._cover_preview.set_content_fit(Gtk.ContentFit.COVER)
+        self._cover_row.add_suffix(self._cover_preview)
+
+        clear_cover = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
+        clear_cover.set_tooltip_text("Remove cover reference")
+        clear_cover.set_valign(Gtk.Align.CENTER)
+        clear_cover.connect("clicked", self._clear_cover)
+        self._cover_row.add_suffix(clear_cover)
+
+        choose_cover = Gtk.Button.new_from_icon_name("folder-open-symbolic")
+        choose_cover.set_tooltip_text("Choose cover image")
+        choose_cover.set_valign(Gtk.Align.CENTER)
+        choose_cover.connect("clicked", self._choose_cover)
+        self._cover_row.add_suffix(choose_cover)
+        cover_group.add(self._cover_row)
+
+        return toolbar
+
+    def _refresh_all_rows(self) -> None:
+        self._update_platform_labels()
+        self._refresh_executable_row()
+        self._refresh_working_directory_row()
+        self._refresh_cover_row()
+
+    def _update_platform_labels(self) -> None:
+        windows = self._platform is Platform.WINDOWS
+        self._executable_row.set_title(
+            "Executable (.exe)" if windows else "Executable binary"
+        )
+        self._executable_row.set_subtitle(
+            "Select the Windows game executable"
+            if windows
+            else "Select the Linux game executable"
+        )
+        if self._executable:
+            self._refresh_executable_row()
+
+    def _refresh_executable_row(self) -> None:
+        if self._executable:
+            self._executable_row.set_subtitle(self._executable)
+        else:
+            self._executable_row.set_subtitle(
+                "Select the Windows .exe file"
+                if self._platform is Platform.WINDOWS
+                else "Select the Linux executable"
+            )
+
+    def _refresh_working_directory_row(self) -> None:
+        if self._working_directory:
+            self._working_directory_row.set_subtitle(self._working_directory)
+        else:
+            self._working_directory_row.set_subtitle(
+                "Defaults to the executable's parent directory"
+            )
+
+    def _refresh_cover_row(self) -> None:
+        if self._cover_path:
+            self._cover_row.set_subtitle(self._cover_path)
+            texture = load_cover_texture(self._cover_path, 80, 104)
+            self._cover_preview.set_paintable(texture)
+            self._cover_preview.set_visible(texture is not None)
+        else:
+            self._cover_row.set_subtitle("No cover selected")
+            self._cover_preview.set_paintable(None)
+            self._cover_preview.set_visible(False)
+
+    def _on_platform_changed(self, _row: Adw.ComboRow, _pspec: object) -> None:
+        selected = self._platform_row.get_selected()
+        self._platform = Platform.WINDOWS if selected == 1 else Platform.LINUX
+        self._update_platform_labels()
+
+    def _set_initial_folder(self, dialog: Gtk.FileDialog, path: str | None) -> None:
+        if not path:
+            return
+        folder = Path(path).expanduser()
+        if folder.is_file():
+            folder = folder.parent
+        if folder.is_dir():
+            dialog.set_initial_folder(Gio.File.new_for_path(str(folder)))
+
+    def _file_filters(
+        self, name: str, patterns: tuple[str, ...]
+    ) -> tuple[Gio.ListStore, Gtk.FileFilter]:
+        file_filter = Gtk.FileFilter()
+        file_filter.set_name(name)
+        for pattern in patterns:
+            file_filter.add_pattern(pattern)
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(file_filter)
+        return filters, file_filter
+
+    def _choose_executable(self, _widget: Gtk.Widget) -> None:
+        dialog = Gtk.FileDialog(title="Select game executable", modal=True)
+        if self._platform is Platform.WINDOWS:
+            filters, default = self._file_filters(
+                "Windows executables (*.exe)", ("*.exe", "*.EXE")
+            )
+        else:
+            filters, default = self._file_filters("All files", ("*",))
+        dialog.set_filters(filters)
+        dialog.set_default_filter(default)
+        self._set_initial_folder(dialog, self._executable)
+        self._active_file_dialog = dialog
+        dialog.open(self._parent_window, None, self._on_executable_selected)
+
+    def _on_executable_selected(
+        self, dialog: Gtk.FileDialog, result: Gio.AsyncResult
+    ) -> None:
+        self._active_file_dialog = None
+        try:
+            selected = dialog.open_finish(result)
+        except GLib.Error as error:
+            if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                self._show_error(error.message)
+            return
+
+        path = selected.get_path()
+        if not path:
+            self._show_error("Only local files can be selected.")
+            return
+
+        previous_executable = self._executable
+        previous_parent = (
+            str(Path(previous_executable).expanduser().parent)
+            if previous_executable
+            else ""
+        )
+        self._executable = path
+        new_parent = str(Path(path).parent)
+
+        # Preserve a deliberately customized working directory; otherwise keep
+        # the default working directory in sync with the chosen executable.
+        if not self._working_directory or self._working_directory == previous_parent:
+            self._working_directory = new_parent
+
+        if not self._name_row.get_text().strip():
+            self._name_row.set_text(Path(path).stem)
+
+        self._refresh_executable_row()
+        self._refresh_working_directory_row()
+
+    def _choose_working_directory(self, _widget: Gtk.Widget) -> None:
+        dialog = Gtk.FileDialog(title="Select working directory", modal=True)
+        self._set_initial_folder(
+            dialog, self._working_directory or self._executable
+        )
+        self._active_file_dialog = dialog
+        dialog.select_folder(self._parent_window, None, self._on_working_directory_selected)
+
+    def _on_working_directory_selected(
+        self, dialog: Gtk.FileDialog, result: Gio.AsyncResult
+    ) -> None:
+        self._active_file_dialog = None
+        try:
+            selected = dialog.select_folder_finish(result)
+        except GLib.Error as error:
+            if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                self._show_error(error.message)
+            return
+
+        path = selected.get_path()
+        if not path:
+            self._show_error("Only local directories can be selected.")
+            return
+        self._working_directory = path
+        self._refresh_working_directory_row()
+
+    def _reset_working_directory(self, _button: Gtk.Button) -> None:
+        self._working_directory = (
+            GameManager.default_working_directory(self._executable)
+            if self._executable
+            else ""
+        )
+        self._refresh_working_directory_row()
+
+    def _choose_cover(self, _button: Gtk.Button) -> None:
+        dialog = Gtk.FileDialog(title="Select cover image", modal=True)
+        filters, default = self._file_filters(
+            "Image files", _IMAGE_PATTERNS
+        )
+        dialog.set_filters(filters)
+        dialog.set_default_filter(default)
+        self._set_initial_folder(dialog, self._cover_path or self._executable)
+        self._active_file_dialog = dialog
+        dialog.open(self._parent_window, None, self._on_cover_selected)
+
+    def _on_cover_selected(
+        self, dialog: Gtk.FileDialog, result: Gio.AsyncResult
+    ) -> None:
+        self._active_file_dialog = None
+        try:
+            selected = dialog.open_finish(result)
+        except GLib.Error as error:
+            if not error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                self._show_error(error.message)
+            return
+
+        path = selected.get_path()
+        if not path:
+            self._show_error("Only local cover files can be selected.")
+            return
+        if load_cover_texture(path, 80, 104) is None:
+            self._show_error(
+                "The selected cover could not be read as an image. "
+                "Choose a supported PNG, JPEG, WebP, AVIF, GIF, or BMP file."
+            )
+            return
+        self._cover_path = path
+        self._refresh_cover_row()
+
+    def _clear_cover(self, _button: Gtk.Button) -> None:
+        self._cover_path = None
+        self._refresh_cover_row()
+
+    def _on_save_clicked(self, _button: Gtk.Button) -> None:
+        draft = GameDraft(
+            name=self._name_row.get_text(),
+            platform=self._platform,
+            executable=self._executable,
+            working_directory=self._working_directory,
+            launch_arguments=self._arguments_row.get_text(),
+            cover_path=self._cover_path,
+        )
+        try:
+            if self._game:
+                saved = self._manager.update_game(self._game.id, draft)
+            else:
+                saved = self._manager.add_game(draft)
+        except LauncherError as error:
+            self._show_error(str(error))
+            return
+        except OSError as error:
+            self._show_error(f"The game could not be saved: {error}")
+            return
+
+        self.emit("saved", saved)
+        self.close()
+
+    def _show_error(self, message: str) -> None:
+        """Present validation details without dismissing the form."""
+        dialog = Adw.AlertDialog(heading="Cannot save game", body=message)
+        dialog.add_response("close", "Close")
+        dialog.set_default_response("close")
+        dialog.set_close_response("close")
+        self._active_error = dialog
+        dialog.choose(self, None, self._on_error_closed)
+
+    def _on_error_closed(
+        self, dialog: Adw.AlertDialog, result: Gio.AsyncResult
+    ) -> None:
+        self._active_error = None
+        try:
+            dialog.choose_finish(result)
+        except GLib.Error:
+            pass

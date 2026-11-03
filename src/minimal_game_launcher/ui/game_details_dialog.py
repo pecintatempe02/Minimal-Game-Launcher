@@ -1,0 +1,107 @@
+"""Read-only game details dialog with edit and removal actions."""
+
+from __future__ import annotations
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+
+from gi.repository import Adw, GObject, Gtk  # noqa: E402
+
+from minimal_game_launcher.models import Game, Platform  # noqa: E402
+
+
+class GameDetailsDialog(Adw.Dialog):
+    """Show all stored metadata without modifying it.
+
+    Edit and remove requests are emitted to the main window, which owns the
+    corresponding dialogs and confirmation flow.
+    """
+
+    __gsignals__ = {
+        "edit-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
+        "remove-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
+    }
+
+    def __init__(self, game: Game) -> None:
+        super().__init__()
+        self._game = game
+        self.set_content_width(620)
+        self.set_content_height(620)
+        self.set_can_close(True)
+        self.set_child(self._build_ui())
+
+    def _add_value_row(
+        self, group: Adw.PreferencesGroup, title: str, value: str
+    ) -> Adw.ActionRow:
+        row = Adw.ActionRow(title=title)
+        row.set_subtitle(value or "None")
+        row.set_subtitle_selectable(True)
+        group.add(row)
+        return row
+
+    def _build_ui(self) -> Gtk.Widget:
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title="Game details"))
+        close = Gtk.Button(label="Close")
+        close.add_css_class("flat")
+        close.connect("clicked", lambda _button: self.close())
+        header.pack_start(close)
+
+        remove = Gtk.Button(label="Remove")
+        remove.add_css_class("destructive-action")
+        remove.connect("clicked", self._on_remove_clicked)
+        header.pack_end(remove)
+
+        edit = Gtk.Button(label="Edit")
+        edit.add_css_class("suggested-action")
+        edit.connect("clicked", self._on_edit_clicked)
+        header.pack_end(edit)
+
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(header)
+
+        page = Adw.PreferencesPage()
+        toolbar.set_content(page)
+
+        overview = Adw.PreferencesGroup(title="Overview")
+        page.add(overview)
+        self._add_value_row(overview, "Name", self._game.name)
+        self._add_value_row(
+            overview, "Platform", self._game.platform.display_name
+        )
+
+        launch = Adw.PreferencesGroup(title="Launch configuration")
+        page.add(launch)
+        self._add_value_row(launch, "Executable", self._game.executable)
+        self._add_value_row(
+            launch, "Working directory", self._game.working_directory
+        )
+        self._add_value_row(
+            launch,
+            "Launch arguments",
+            self._game.launch_arguments or "No arguments",
+        )
+
+        files = Adw.PreferencesGroup(title="Files")
+        page.add(files)
+        self._add_value_row(
+            files, "Cover image", self._game.cover_path or "No cover"
+        )
+        if self._game.platform is Platform.WINDOWS:
+            self._add_value_row(
+                files,
+                "Wine prefix",
+                self._game.wine_prefix_path or "Not assigned",
+            )
+
+        return toolbar
+
+    def _on_edit_clicked(self, _button: Gtk.Button) -> None:
+        self.emit("edit-requested", self._game)
+        self.close()
+
+    def _on_remove_clicked(self, _button: Gtk.Button) -> None:
+        self.emit("remove-requested", self._game)
+        self.close()

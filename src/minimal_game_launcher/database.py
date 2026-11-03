@@ -1,0 +1,156 @@
+"""SQLite persistence for the game library.
+
+All SQL in the application lives in this module. The database stores metadata
+only: it never creates, moves, or deletes game executables, installation
+directories, Wine prefixes, or cover files.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from minimal_game_launcher.models import Game, Platform
+
+SCHEMA_VERSION = 1
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS games (
+    id                TEXT PRIMARY KEY NOT NULL,
+    name              TEXT NOT NULL,
+    platform          TEXT NOT NULL CHECK (platform IN ('linux', 'windows')),
+    executable        TEXT NOT NULL,
+    working_directory TEXT NOT NULL,
+    launch_arguments  TEXT NOT NULL DEFAULT '',
+    cover_path        TEXT,
+    wine_prefix_path  TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS games_name_nocase ON games(name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS games_created_at ON games(created_at);
+"""
+
+
+class Database:
+    """Own the SQLite connection and all game-library SQL operations."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path).expanduser()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._connection = sqlite3.connect(self.path)
+        self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA journal_mode = WAL")
+        self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Create or upgrade the schema using SQLite's user_version marker."""
+        version = self._connection.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Library database schema {version} is newer than supported "
+                f"schema {SCHEMA_VERSION}."
+            )
+        if version < 1:
+            with self._connection:
+                self._connection.executescript(_SCHEMA)
+                self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    @staticmethod
+    def _to_game(row: sqlite3.Row) -> Game:
+        """Map a SQLite row to the immutable domain model."""
+        return Game(
+            id=row["id"],
+            name=row["name"],
+            platform=Platform(row["platform"]),
+            executable=row["executable"],
+            working_directory=row["working_directory"],
+            launch_arguments=row["launch_arguments"],
+            cover_path=row["cover_path"],
+            wine_prefix_path=row["wine_prefix_path"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def add_game(self, game: Game) -> None:
+        """Insert a validated game record."""
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO games (
+                    id, name, platform, executable, working_directory,
+                    launch_arguments, cover_path, wine_prefix_path,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    game.id,
+                    game.name,
+                    game.platform.value,
+                    game.executable,
+                    game.working_directory,
+                    game.launch_arguments,
+                    game.cover_path,
+                    game.wine_prefix_path,
+                    game.created_at,
+                    game.updated_at,
+                ),
+            )
+
+    def update_game(self, game: Game) -> bool:
+        """Update a game record; return whether a row existed."""
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE games SET
+                    name = ?,
+                    platform = ?,
+                    executable = ?,
+                    working_directory = ?,
+                    launch_arguments = ?,
+                    cover_path = ?,
+                    wine_prefix_path = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    game.name,
+                    game.platform.value,
+                    game.executable,
+                    game.working_directory,
+                    game.launch_arguments,
+                    game.cover_path,
+                    game.wine_prefix_path,
+                    game.updated_at,
+                    game.id,
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def delete_game(self, game_id: str) -> bool:
+        """Delete only the library row, never any external file.
+
+        Cover images are user-selected files and may be shared by multiple
+        entries, so they are not owned by this database and are never removed.
+        """
+        with self._connection:
+            cursor = self._connection.execute("DELETE FROM games WHERE id = ?", (game_id,))
+        return cursor.rowcount > 0
+
+    def get_game(self, game_id: str) -> Game | None:
+        """Return one game by ID, or ``None`` if it no longer exists."""
+        row = self._connection.execute(
+            "SELECT * FROM games WHERE id = ?", (game_id,)
+        ).fetchone()
+        return self._to_game(row) if row is not None else None
+
+    def list_games(self) -> list[Game]:
+        """Return every library entry without applying UI search or sorting."""
+        rows = self._connection.execute("SELECT * FROM games").fetchall()
+        return [self._to_game(row) for row in rows]
+
+    def close(self) -> None:
+        """Close the SQLite connection."""
+        self._connection.close()
