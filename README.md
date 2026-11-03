@@ -161,8 +161,10 @@ paths to them, so restore them to the same locations.
 If `library.db` is not a valid SQLite file, or SQLite reports page corruption
 when opening it, the launcher:
 
-1. Renames the damaged file and any `-wal`/`-shm` sidecars to
-   `library.db.damaged-<UTC timestamp>`. Nothing is deleted.
+1. Renames the damaged file, and any `-wal`/`-shm` sidecars that still exist,
+   to `library.db.damaged-<UTC timestamp>`. Nothing is deleted. For a file
+   with a valid header but damaged pages, SQLite may already have removed the
+   `-wal` during the failed open, so that log may not be preserved.
 2. Creates an empty library.
 3. Shows a **Library recovered** dialog with the backup path.
 
