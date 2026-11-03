@@ -582,3 +582,79 @@ def test_process_status_updates_from_start_to_finish(
     assert kwargs["stdout"] == subprocess.DEVNULL
     assert kwargs["stderr"] == subprocess.DEVNULL
     assert "WINEPREFIX" not in kwargs["env"]  # type: ignore[operator]
+
+
+class RecordingProcess(FakeProcess):
+    """Fake process that records any attempt to signal it."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.signals: list[str] = []
+
+    def terminate(self) -> None:
+        self.signals.append("terminate")
+
+    def kill(self) -> None:
+        self.signals.append("kill")
+
+    def send_signal(self, sig: int) -> None:
+        self.signals.append(f"signal {sig}")
+
+
+def test_signal_terminated_game_reports_negative_status(
+    manager: GameManager, make_executable, tmp_path: Path
+) -> None:
+    """A game killed by a signal is reported as finished with its signal number."""
+    executable = make_executable("killed-game")
+    game = manager.add_game(
+        GameDraft(name="Killed Game", platform=Platform.LINUX, executable=str(executable))
+    )
+    process = RecordingProcess(polls_before_exit=0, returncode=-9)
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        SettingsStore(tmp_path / "settings.json"),
+        popen_factory=FakePopen(process=process),
+        poll_interval_ms=10,
+        which=_no_optional_tools,
+    )
+    finished: list[int] = []
+    launcher.connect(
+        "launch-finished", lambda _manager, _game_id, code: finished.append(code)
+    )
+
+    assert launcher.launch(game)
+    _run_main_loop_until(lambda: len(finished) >= 1)
+    launcher.shutdown()
+
+    assert finished == [-9]
+    assert launcher.status(game.id) is None
+
+
+def test_shutdown_leaves_running_games_untouched(
+    manager: GameManager, make_executable, tmp_path: Path
+) -> None:
+    """Closing the launcher stops monitoring but never signals a game process."""
+    executable = make_executable("still-running")
+    game = manager.add_game(
+        GameDraft(name="Still Running", platform=Platform.LINUX, executable=str(executable))
+    )
+    process = RecordingProcess(polls_before_exit=10**6, returncode=0)
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        SettingsStore(tmp_path / "settings.json"),
+        popen_factory=FakePopen(process=process),
+        poll_interval_ms=10,
+        which=_no_optional_tools,
+    )
+    started: list[int] = []
+    launcher.connect(
+        "launch-started", lambda _manager, _game_id, pid: started.append(pid)
+    )
+
+    assert launcher.launch(game)
+    _run_main_loop_until(lambda: len(started) >= 1)
+    assert launcher.is_running(game.id)
+    launcher.shutdown()
+
+    assert process.signals == []
+    assert launcher.is_running(game.id) is False
