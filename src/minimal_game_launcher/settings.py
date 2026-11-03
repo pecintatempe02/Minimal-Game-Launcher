@@ -96,6 +96,24 @@ class SettingsStore:
         )
         temporary.replace(self.path)
 
+    def load_stored_api_key(self) -> str | None:
+        """Return only the key saved in the private file, ignoring the environment.
+
+        The settings dialog uses this for its pre-filled value so that saving
+        unrelated settings never copies an inherited environment key to disk.
+        """
+        if not self.api_key_path.is_file():
+            return None
+        try:
+            key = self.api_key_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            LOGGER.exception(
+                "Could not read the SteamGridDB API key from %s",
+                self.api_key_path,
+            )
+            return None
+        return key or None
+
     def load_api_key(self) -> str | None:
         """Return the optional SteamGridDB key from its private file or env.
 
@@ -104,17 +122,9 @@ class SettingsStore:
         "online search not configured"; they never prevent the app from
         starting.
         """
-        if self.api_key_path.is_file():
-            try:
-                key = self.api_key_path.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeError):
-                LOGGER.exception(
-                    "Could not read the SteamGridDB API key from %s",
-                    self.api_key_path,
-                )
-            else:
-                if key:
-                    return key
+        stored = self.load_stored_api_key()
+        if stored:
+            return stored
 
         environment_key = os.environ.get("STEAMGRIDDB_API_KEY", "").strip()
         return environment_key or None

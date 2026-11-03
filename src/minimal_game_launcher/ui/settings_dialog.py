@@ -117,7 +117,7 @@ class SettingsDialog(Adw.Dialog):
         page.add(cover_group)
 
         self._api_key_row = Adw.PasswordEntryRow(title="SteamGridDB API key")
-        self._api_key_row.set_text(settings_store.load_api_key() or "")
+        self._api_key_row.set_text(settings_store.load_stored_api_key() or "")
         cover_group.add(self._api_key_row)
 
         return toolbar

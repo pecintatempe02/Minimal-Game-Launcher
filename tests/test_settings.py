@@ -76,6 +76,18 @@ def test_private_file_takes_precedence_over_environment(
     assert store.load_api_key() == "from-file"
 
 
+def test_stored_key_ignores_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STEAMGRIDDB_API_KEY", "from-environment")
+    store = _store(tmp_path)
+
+    assert store.load_stored_api_key() is None
+
+    store.save_api_key("from-file")
+    assert store.load_stored_api_key() == "from-file"
+
+
 def test_missing_key_returns_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
