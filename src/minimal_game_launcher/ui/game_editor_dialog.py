@@ -2,7 +2,8 @@
 
 File selection uses GTK's native ``Gtk.FileDialog``. The dialog only collects
 values; all path validation and persistence is delegated to ``GameManager`` so
-the same rules apply to add and edit operations.
+the same rules apply to add and edit operations. Performance switches are
+included here but wrapper construction belongs to ``PerformanceManager``.
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
 from minimal_game_launcher.errors import LauncherError  # noqa: E402
 from minimal_game_launcher.models import Game, GameDraft, Platform  # noqa: E402
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
+from minimal_game_launcher.services.performance_manager import (  # noqa: E402
+    PerformanceManager,
+)
 from minimal_game_launcher.ui.cover import load_cover_texture  # noqa: E402
 
 _IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.avif", "*.gif", "*.bmp")
@@ -40,11 +44,15 @@ class GameEditorDialog(Adw.Dialog):
         parent_window: Gtk.Window,
         manager: GameManager,
         game: Game | None = None,
+        *,
+        performance_manager: PerformanceManager | None = None,
     ) -> None:
         super().__init__()
         self._parent_window = parent_window
         self._manager = manager
         self._game = game
+        self._performance_manager = performance_manager or PerformanceManager()
+        self._availability = self._performance_manager.detect()
         self._active_file_dialog: Gtk.FileDialog | None = None
         self._active_error: Adw.AlertDialog | None = None
 
@@ -52,6 +60,8 @@ class GameEditorDialog(Adw.Dialog):
         self._executable = game.executable if game else ""
         self._working_directory = game.working_directory if game else ""
         self._cover_path = game.cover_path if game else None
+        self._gamemode_enabled = game.gamemode_enabled if game else True
+        self._mangohud_enabled = game.mangohud_enabled if game else False
 
         self.set_content_width(620)
         self.set_content_height(700)
@@ -142,6 +152,23 @@ class GameEditorDialog(Adw.Dialog):
             self._arguments_row.set_text(self._game.launch_arguments)
         launch_group.add(self._arguments_row)
 
+        performance_group = Adw.PreferencesGroup(
+            title="Performance",
+            description=(
+                "Optional integrations. Missing tools never prevent a game "
+                "from starting; the launcher explains any fallback."
+            ),
+        )
+        preferences.add(performance_group)
+
+        self._gamemode_row = Adw.SwitchRow(title="GameMode")
+        self._gamemode_row.set_active(self._gamemode_enabled)
+        performance_group.add(self._gamemode_row)
+
+        self._mangohud_row = Adw.SwitchRow(title="MangoHud")
+        self._mangohud_row.set_active(self._mangohud_enabled)
+        performance_group.add(self._mangohud_row)
+
         cover_group = Adw.PreferencesGroup(
             title="Cover",
             description=(
@@ -178,6 +205,7 @@ class GameEditorDialog(Adw.Dialog):
         self._update_platform_labels()
         self._refresh_executable_row()
         self._refresh_working_directory_row()
+        self._refresh_performance_rows()
         self._refresh_cover_row()
 
     def _update_platform_labels(self) -> None:
@@ -211,6 +239,35 @@ class GameEditorDialog(Adw.Dialog):
                 "Defaults to the executable's parent directory"
             )
 
+    def _refresh_performance_rows(self) -> None:
+        """Describe detected tools and known integration limitations."""
+        if self._availability.gamemode_available:
+            self._gamemode_row.set_subtitle(
+                "gamemoderun found in PATH. Enabled games launch through it."
+            )
+        else:
+            self._gamemode_row.set_subtitle(
+                "gamemoderun was not found in PATH. Enabled games will launch "
+                "without GameMode."
+            )
+
+        if not self._availability.mangohud_available:
+            self._mangohud_row.set_subtitle(
+                "mangohud was not found in PATH. The overlay cannot be "
+                "enabled."
+            )
+        elif self._platform is Platform.WINDOWS:
+            # Do not promise a working overlay: Wine needs a 32-bit Vulkan
+            # layer whose presence cannot be verified from the PATH lookup.
+            self._mangohud_row.set_subtitle(
+                "mangohud found in PATH. Wine games use MANGOHUD=1; the "
+                "required 32-bit Vulkan layer is not verified by the launcher."
+            )
+        else:
+            self._mangohud_row.set_subtitle(
+                "mangohud found in PATH. Enabled games launch through it."
+            )
+
     def _refresh_cover_row(self) -> None:
         if self._cover_path:
             self._cover_row.set_subtitle(self._cover_path)
@@ -226,6 +283,7 @@ class GameEditorDialog(Adw.Dialog):
         selected = self._platform_row.get_selected()
         self._platform = Platform.WINDOWS if selected == 1 else Platform.LINUX
         self._update_platform_labels()
+        self._refresh_performance_rows()
 
     def _set_initial_folder(self, dialog: Gtk.FileDialog, path: str | None) -> None:
         if not path:
@@ -378,6 +436,8 @@ class GameEditorDialog(Adw.Dialog):
             working_directory=self._working_directory,
             launch_arguments=self._arguments_row.get_text(),
             cover_path=self._cover_path,
+            gamemode_enabled=self._gamemode_row.get_active(),
+            mangohud_enabled=self._mangohud_row.get_active(),
         )
         try:
             if self._game:

@@ -8,7 +8,9 @@ from the GTK main loop with non-blocking ``Popen.poll`` calls.
 
 A Windows game gets its own ``WINEPREFIX`` under the application data directory.
 Existing prefixes are reused and never removed here. Native games are launched
-directly with no Wine involvement.
+directly with no Wine involvement. Optional GameMode and MangoHud wrappers are
+composed by ``PerformanceManager`` after the base command and environment have
+been validated; missing optional tools produce warnings instead of failures.
 """
 
 from __future__ import annotations
@@ -35,6 +37,9 @@ from minimal_game_launcher.errors import (  # noqa: E402
     WineNotFoundError,
 )
 from minimal_game_launcher.models import Game, Platform  # noqa: E402
+from minimal_game_launcher.services.performance_manager import (  # noqa: E402
+    PerformanceManager,
+)
 from minimal_game_launcher.settings import (  # noqa: E402
     LauncherSettings,
     SettingsStore,
@@ -73,6 +78,7 @@ class LaunchSpec:
     env: dict[str, str]
     prefix_path: str | None
     platform: Platform
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -96,6 +102,7 @@ class LaunchManager(GObject.Object):
         "launch-started": (GObject.SignalFlags.RUN_FIRST, None, (str, int)),
         "launch-finished": (GObject.SignalFlags.RUN_FIRST, None, (str, int)),
         "launch-failed": (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
+        "launch-warning": (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
     }
 
     def __init__(
@@ -103,6 +110,7 @@ class LaunchManager(GObject.Object):
         prefixes_root: str | Path,
         settings_store: SettingsStore,
         *,
+        performance_manager: PerformanceManager | None = None,
         popen_factory: PopenFactory | None = None,
         run_factory: RunFactory | None = None,
         which: WhichFactory | None = None,
@@ -115,6 +123,11 @@ class LaunchManager(GObject.Object):
         self._popen_factory = popen_factory or subprocess.Popen
         self._run_factory = run_factory or subprocess.run
         self._which = which or shutil.which
+        # Share the same lookup function so a launch-time PATH change affects
+        # Wine and performance-wrapper detection consistently.
+        self._performance_manager = performance_manager or PerformanceManager(
+            which=self._which
+        )
         self._poll_interval_ms = max(10, poll_interval_ms)
         self._wineboot_timeout = wineboot_timeout
         self._active: dict[str, _ActiveLaunch] = {}
@@ -191,7 +204,9 @@ class LaunchManager(GObject.Object):
             process.pid,
             list(spec.command),
         )
-        GLib.idle_add(self._register_process, game, process)
+        GLib.idle_add(
+            self._register_process, game, process, spec.warnings
+        )
 
     def _finish_start_failure(self, game_id: str, message: str) -> bool:
         """Remove the starting state and report a readable failure."""
@@ -200,14 +215,22 @@ class LaunchManager(GObject.Object):
             self.emit("launch-failed", game_id, message)
         return GLib.SOURCE_REMOVE
 
-    def _register_process(self, game: Game, process: subprocess.Popen) -> bool:
-        """Record a successfully spawned process on the main thread."""
+    def _register_process(
+        self,
+        game: Game,
+        process: subprocess.Popen,
+        warnings: tuple[str, ...] = (),
+    ) -> bool:
+        """Record a spawned process and surface non-fatal launch warnings."""
         self._starting.discard(game.id)
         if self._shutdown:
             return GLib.SOURCE_REMOVE
 
         self._active[game.id] = _ActiveLaunch(game=game, process=process)
         self._ensure_polling()
+        for warning in warnings:
+            LOGGER.warning("%s: %s", game.name, warning)
+            self.emit("launch-warning", game.id, warning)
         self.emit("launch-started", game.id, int(process.pid))
         return GLib.SOURCE_REMOVE
 
@@ -290,25 +313,33 @@ class LaunchManager(GObject.Object):
             # Every process for a Windows game receives its own WINEPREFIX in
             # its environment; global Wine configuration is never modified.
             environment = self.build_environment(Platform.WINDOWS, prefix)
-            command = (wine_executable, str(executable), *arguments)
+            base_command = (wine_executable, str(executable), *arguments)
+            plan = self._performance_manager.compose(
+                game, base_command, environment
+            )
             return LaunchSpec(
-                command=command,
+                command=plan.command,
                 cwd=str(working_directory),
-                env=environment,
+                env=plan.environment,
                 prefix_path=prefix,
                 platform=game.platform,
+                warnings=plan.warnings,
             )
 
         # Native games are executed directly. Removing an inherited WINEPREFIX
         # prevents an accidental Wine environment from affecting the process.
         environment = self.build_environment(Platform.LINUX, None)
-        command = (str(executable), *arguments)
+        base_command = (str(executable), *arguments)
+        plan = self._performance_manager.compose(
+            game, base_command, environment
+        )
         return LaunchSpec(
-            command=command,
+            command=plan.command,
             cwd=str(working_directory),
-            env=environment,
+            env=plan.environment,
             prefix_path=None,
             platform=game.platform,
+            warnings=plan.warnings,
         )
 
     def _validated_executable(self, game: Game) -> Path:

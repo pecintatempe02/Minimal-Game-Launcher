@@ -108,6 +108,11 @@ class FakePopen:
         return self.process
 
 
+def _no_optional_tools(_name: str) -> str | None:
+    """Model a system without GameMode or MangoHud for deterministic tests."""
+    return None
+
+
 def _windows_game(
     manager: GameManager, tmp_path: Path, name: str = "Wine Game"
 ) -> Game:
@@ -185,6 +190,7 @@ def test_prefix_creation_uses_wineboot_and_lazy_directory(
         tmp_path / "unused-prefix-root",
         _custom_wine_store(tmp_path, fake_wine),
         run_factory=runner,
+        which=_no_optional_tools,
     )
     spec = launcher.prepare_launch(game)
 
@@ -211,6 +217,7 @@ def test_prefix_reuse_skips_wineboot(
         tmp_path / "prefixes",
         _custom_wine_store(tmp_path, fake_wine),
         run_factory=runner,
+        which=_no_optional_tools,
     )
 
     launcher.prepare_launch(game)
@@ -232,6 +239,7 @@ def test_each_windows_game_uses_a_separate_prefix(
         tmp_path / "prefixes",
         _custom_wine_store(tmp_path, fake_wine),
         run_factory=runner,
+        which=_no_optional_tools,
     )
     first_spec = launcher.prepare_launch(first)
     second_spec = launcher.prepare_launch(second)
@@ -264,8 +272,10 @@ def test_native_game_runs_without_wine_or_prefix(
         )
     )
 
-    def fail_lookup(_name: str) -> str | None:
-        raise AssertionError("Native launches must not look up Wine")
+    def fail_lookup(name: str) -> str | None:
+        if name in {"wine", "wine64"}:
+            raise AssertionError("Native launches must not look up Wine")
+        return None
 
     monkeypatch.setenv("WINEPREFIX", "/should/not/leak")
     launcher = LaunchManager(
@@ -295,6 +305,7 @@ def test_wine_game_command_sets_wineprefix(
         tmp_path / "prefixes",
         _custom_wine_store(tmp_path, fake_wine),
         run_factory=FakeRunner(),
+        which=_no_optional_tools,
     )
     spec = launcher.prepare_launch(game)
 
@@ -333,6 +344,7 @@ def test_wine_process_is_spawned_with_wineprefix(
         run_factory=FakeRunner(),
         popen_factory=popen,
         poll_interval_ms=10,
+        which=_no_optional_tools,
     )
     events: list[str] = []
     launcher.connect(
@@ -378,6 +390,7 @@ def test_paths_with_spaces_are_preserved(
         prefix_root,
         _custom_wine_store(tmp_path, fake_wine),
         run_factory=FakeRunner(),
+        which=_no_optional_tools,
     )
     spec = launcher.prepare_launch(game)
 
@@ -453,6 +466,7 @@ def test_prefix_initialization_failure_is_reported(
         tmp_path / "prefixes",
         _custom_wine_store(tmp_path, fake_wine),
         run_factory=FakeRunner(returncode=1, create_prefix=False),
+        which=_no_optional_tools,
     )
 
     with pytest.raises(
@@ -499,6 +513,7 @@ def test_process_creation_failure_is_reported_asynchronously(
         SettingsStore(tmp_path / "settings.json"),
         popen_factory=popen,
         poll_interval_ms=10,
+        which=_no_optional_tools,
     )
     events: list[tuple[str, str]] = []
     launcher.connect(
@@ -540,6 +555,7 @@ def test_process_status_updates_from_start_to_finish(
         SettingsStore(tmp_path / "settings.json"),
         popen_factory=popen,
         poll_interval_ms=10,
+        which=_no_optional_tools,
     )
     events: list[tuple[str, int]] = []
     launcher.connect(

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 import minimal_game_launcher.services.game_manager as game_manager_module
+from minimal_game_launcher.database import Database
 from minimal_game_launcher.errors import GameValidationError
 from minimal_game_launcher.models import GameDraft, Platform
 from minimal_game_launcher.services.game_manager import (
@@ -243,3 +245,73 @@ def test_search_and_sorting(
         "Minecraft"
     ]
     assert manager.list_games("no-such-game") == []
+
+
+def test_performance_toggles_default_and_persist(
+    manager: GameManager, make_executable
+) -> None:
+    """New games use the Phase 4 defaults and both toggles are independently editable."""
+    executable = make_executable("performance-game")
+    game = manager.add_game(_linux_draft("Performance", executable))
+
+    assert game.gamemode_enabled is True
+    assert game.mangohud_enabled is False
+
+    updated = manager.update_game(
+        game.id,
+        _linux_draft(
+            "Performance",
+            executable,
+            gamemode_enabled=False,
+            mangohud_enabled=True,
+        ),
+    )
+
+    assert updated.gamemode_enabled is False
+    assert updated.mangohud_enabled is True
+    assert manager.get_game(game.id) == updated
+
+
+def test_database_migrates_phase3_rows_with_defaults(tmp_path: Path) -> None:
+    """Opening a Phase 3 database adds the toggles without losing the row."""
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE games (
+            id                TEXT PRIMARY KEY NOT NULL,
+            name              TEXT NOT NULL,
+            platform          TEXT NOT NULL,
+            executable        TEXT NOT NULL,
+            working_directory TEXT NOT NULL,
+            launch_arguments  TEXT NOT NULL DEFAULT '',
+            cover_path        TEXT,
+            wine_prefix_path  TEXT,
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL
+        );
+        PRAGMA user_version = 1;
+        INSERT INTO games (
+            id, name, platform, executable, working_directory,
+            launch_arguments, cover_path, wine_prefix_path,
+            created_at, updated_at
+        ) VALUES (
+            'legacy-id', 'Legacy Game', 'windows', '/games/legacy.exe',
+            '/games', '', NULL, '/prefixes/legacy-id',
+            '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(path)
+    try:
+        game = database.get_game("legacy-id")
+        assert game is not None
+        assert game.gamemode_enabled is True
+        assert game.mangohud_enabled is False
+        version = database._connection.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 2
+    finally:
+        database.close()

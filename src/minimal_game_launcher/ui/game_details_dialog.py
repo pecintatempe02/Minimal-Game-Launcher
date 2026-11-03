@@ -90,6 +90,19 @@ class GameDetailsDialog(Adw.Dialog):
             self._game.launch_arguments or "No arguments",
         )
 
+        performance = Adw.PreferencesGroup(title="Performance")
+        page.add(performance)
+        self._add_value_row(
+            performance,
+            "GameMode",
+            "Enabled" if self._game.gamemode_enabled else "Disabled",
+        )
+        self._add_value_row(
+            performance,
+            "MangoHud",
+            "Enabled" if self._game.mangohud_enabled else "Disabled",
+        )
+
         files = Adw.PreferencesGroup(title="Files")
         page.add(files)
         self._add_value_row(

@@ -28,6 +28,11 @@ class GameDraft:
     working_directory: str = ""
     launch_arguments: str = ""
     cover_path: str | None = None
+    # Performance wrappers are opt-out rather than opt-in for GameMode, matching
+    # the Phase 4 default. MangoHud stays opt-in because its overlay changes the
+    # rendered output and may be unsupported by some games or graphics APIs.
+    gamemode_enabled: bool = True
+    mangohud_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,5 +47,7 @@ class Game:
     launch_arguments: str
     cover_path: str | None
     wine_prefix_path: str | None
+    gamemode_enabled: bool
+    mangohud_enabled: bool
     created_at: str
     updated_at: str

@@ -24,6 +24,9 @@ from minimal_game_launcher.paths import (  # noqa: E402
 )
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
 from minimal_game_launcher.services.launch_manager import LaunchManager  # noqa: E402
+from minimal_game_launcher.services.performance_manager import (  # noqa: E402
+    PerformanceManager,
+)
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 from minimal_game_launcher.ui.main_window import MainWindow  # noqa: E402
 
@@ -41,6 +44,7 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._database: Database | None = None
         self._manager: GameManager | None = None
         self._launch_manager: LaunchManager | None = None
+        self._performance_manager: PerformanceManager | None = None
         self._settings_store: SettingsStore | None = None
         self._window: MainWindow | None = None
 
@@ -55,10 +59,13 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._database = Database(database_path())
         self._manager = GameManager(self._database, prefixes_directory())
         self._settings_store = SettingsStore(settings_path())
+        self._performance_manager = PerformanceManager()
         # The launch manager reads settings before each Windows launch, so a
         # change in the settings dialog applies without restarting the app.
         self._launch_manager = LaunchManager(
-            prefixes_directory(), self._settings_store
+            prefixes_directory(),
+            self._settings_store,
+            performance_manager=self._performance_manager,
         )
 
     def do_activate(self) -> None:
@@ -67,11 +74,16 @@ class MinimalGameLauncherApplication(Adw.Application):
                 raise RuntimeError("Application started without its services.")
             if self._settings_store is None:
                 raise RuntimeError("Application started without settings.")
+            if self._performance_manager is None:
+                raise RuntimeError(
+                    "Application started without performance detection."
+                )
             self._window = MainWindow(
                 self,
                 self._manager,
                 self._launch_manager,
                 self._settings_store,
+                self._performance_manager,
             )
         self._window.present()
 
@@ -81,6 +93,7 @@ class MinimalGameLauncherApplication(Adw.Application):
             # and their prefixes remain untouched.
             self._launch_manager.shutdown()
             self._launch_manager = None
+        self._performance_manager = None
         if self._database is not None:
             self._database.close()
             self._database = None

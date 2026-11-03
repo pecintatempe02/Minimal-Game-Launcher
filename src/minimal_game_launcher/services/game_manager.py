@@ -166,6 +166,8 @@ class GameManager:
             launch_arguments=normalized.launch_arguments,
             cover_path=normalized.cover_path,
             wine_prefix_path=self._prefix_for(game_id, normalized.platform, None),
+            gamemode_enabled=normalized.gamemode_enabled,
+            mangohud_enabled=normalized.mangohud_enabled,
             created_at=timestamp,
             updated_at=timestamp,
         )
@@ -190,6 +192,8 @@ class GameManager:
             wine_prefix_path=self._prefix_for(
                 existing.id, normalized.platform, existing.wine_prefix_path
             ),
+            gamemode_enabled=normalized.gamemode_enabled,
+            mangohud_enabled=normalized.mangohud_enabled,
             created_at=existing.created_at,
             updated_at=_utc_now(),
         )

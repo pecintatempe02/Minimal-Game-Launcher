@@ -19,6 +19,9 @@ from minimal_game_launcher.services.game_manager import (  # noqa: E402
 from minimal_game_launcher.services.launch_manager import (  # noqa: E402
     LaunchManager,
 )
+from minimal_game_launcher.services.performance_manager import (  # noqa: E402
+    PerformanceManager,
+)
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 from minimal_game_launcher.ui.game_card import GameCard  # noqa: E402
 from minimal_game_launcher.ui.game_details_dialog import GameDetailsDialog  # noqa: E402
@@ -39,11 +42,13 @@ class MainWindow(Adw.ApplicationWindow):
         manager: GameManager,
         launch_manager: LaunchManager,
         settings_store: SettingsStore,
+        performance_manager: PerformanceManager,
     ) -> None:
         super().__init__(application=application)
         self._manager = manager
         self._launch_manager = launch_manager
         self._settings_store = settings_store
+        self._performance_manager = performance_manager
         self._active_editor: GameEditorDialog | None = None
         self._active_details: GameDetailsDialog | None = None
         self._active_settings: SettingsDialog | None = None
@@ -57,6 +62,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._launch_manager.connect("launch-started", self._on_launch_started)
         self._launch_manager.connect("launch-finished", self._on_launch_finished)
         self._launch_manager.connect("launch-failed", self._on_launch_failed)
+        self._launch_manager.connect("launch-warning", self._on_launch_warning)
 
         self._refresh_library()
 
@@ -236,6 +242,13 @@ class MainWindow(Adw.ApplicationWindow):
         self._set_card_status(game_id, None)
         self._show_error(message, heading="Game could not start")
 
+    def _on_launch_warning(
+        self, _manager: LaunchManager, _game_id: str, message: str
+    ) -> None:
+        # Performance integrations are optional. A missing wrapper is reported
+        # as a longer-lived warning while the game continues to launch.
+        self._toast(message, timeout=8)
+
     def _set_card_status(self, game_id: str, status: str | None) -> None:
         card = self._cards_by_id.get(game_id)
         if card is not None:
@@ -274,13 +287,22 @@ class MainWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._confirm_remove, game)
 
     def _open_add_dialog(self) -> None:
-        dialog = GameEditorDialog(self, self._manager)
+        dialog = GameEditorDialog(
+            self,
+            self._manager,
+            performance_manager=self._performance_manager,
+        )
         dialog.connect("saved", self._on_game_saved)
         self._active_editor = dialog
         dialog.present(self)
 
     def _open_edit_dialog(self, game: Game) -> None:
-        dialog = GameEditorDialog(self, self._manager, game)
+        dialog = GameEditorDialog(
+            self,
+            self._manager,
+            game,
+            performance_manager=self._performance_manager,
+        )
         dialog.connect("saved", self._on_game_saved)
         self._active_editor = dialog
         dialog.present(self)
@@ -349,9 +371,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._refresh_library()
         self._toast(f"Removed {game.name} from the library")
 
-    def _toast(self, message: str) -> None:
+    def _toast(self, message: str, *, timeout: int = 3) -> None:
         toast = Adw.Toast.new(message)
-        toast.set_timeout(3)
+        toast.set_timeout(timeout)
         self._toast_overlay.add_toast(toast)
 
     def _show_error(

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from minimal_game_launcher.models import Game, Platform
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS games (
     launch_arguments  TEXT NOT NULL DEFAULT '',
     cover_path        TEXT,
     wine_prefix_path  TEXT,
+    gamemode_enabled  INTEGER NOT NULL DEFAULT 1
+                      CHECK (gamemode_enabled IN (0, 1)),
+    mangohud_enabled   INTEGER NOT NULL DEFAULT 0
+                      CHECK (mangohud_enabled IN (0, 1)),
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -54,9 +58,30 @@ class Database:
                 f"schema {SCHEMA_VERSION}."
             )
         if version < 1:
+            # A fresh database already contains the current columns, so it is
+            # stamped with the newest version and no ALTER statements are run.
             with self._connection:
                 self._connection.executescript(_SCHEMA)
                 self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            return
+
+        if version < 2:
+            # Phase 4 adds independent performance toggles. Existing Phase 3
+            # rows receive the documented defaults without being rewritten.
+            with self._connection:
+                self._connection.execute(
+                    "ALTER TABLE games ADD COLUMN gamemode_enabled "
+                    "INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK (gamemode_enabled IN (0, 1))"
+                )
+                self._connection.execute(
+                    "ALTER TABLE games ADD COLUMN mangohud_enabled "
+                    "INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (mangohud_enabled IN (0, 1))"
+                )
+                self._connection.execute(
+                    f"PRAGMA user_version = {SCHEMA_VERSION}"
+                )
 
     @staticmethod
     def _to_game(row: sqlite3.Row) -> Game:
@@ -70,6 +95,9 @@ class Database:
             launch_arguments=row["launch_arguments"],
             cover_path=row["cover_path"],
             wine_prefix_path=row["wine_prefix_path"],
+            # SQLite has no boolean type; integers are the storage format.
+            gamemode_enabled=bool(row["gamemode_enabled"]),
+            mangohud_enabled=bool(row["mangohud_enabled"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -82,8 +110,9 @@ class Database:
                 INSERT INTO games (
                     id, name, platform, executable, working_directory,
                     launch_arguments, cover_path, wine_prefix_path,
+                    gamemode_enabled, mangohud_enabled,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     game.id,
@@ -94,6 +123,8 @@ class Database:
                     game.launch_arguments,
                     game.cover_path,
                     game.wine_prefix_path,
+                    int(game.gamemode_enabled),
+                    int(game.mangohud_enabled),
                     game.created_at,
                     game.updated_at,
                 ),
@@ -112,6 +143,8 @@ class Database:
                     launch_arguments = ?,
                     cover_path = ?,
                     wine_prefix_path = ?,
+                    gamemode_enabled = ?,
+                    mangohud_enabled = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -123,6 +156,8 @@ class Database:
                     game.launch_arguments,
                     game.cover_path,
                     game.wine_prefix_path,
+                    int(game.gamemode_enabled),
+                    int(game.mangohud_enabled),
                     game.updated_at,
                     game.id,
                 ),
