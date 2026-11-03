@@ -21,6 +21,7 @@ class GameCard(Gtk.FlowBoxChild):
     """
 
     __gsignals__ = {
+        "launch-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "details-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "edit-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "remove-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
@@ -32,12 +33,14 @@ class GameCard(Gtk.FlowBoxChild):
     def __init__(self, game: Game) -> None:
         super().__init__()
         self.game = game
-        self._running = False
+        self._status: str | None = None
+        self._launch_menu_item: Gtk.Button | None = None
         self.add_css_class("game-card-child")
         self.set_child(self._build_content())
         self.set_tooltip_text(
             f"{game.name}\n{game.platform.display_name}\n"
-            "Double-click or use the menu for game details."
+            "Use the play button to launch. Double-click or use the menu for "
+            "game details."
         )
 
     def _build_content(self) -> Gtk.Widget:
@@ -120,6 +123,22 @@ class GameCard(Gtk.FlowBoxChild):
         menu_box.append(self._build_menu())
         overlay.add_overlay(menu_box)
 
+        launch_box = Gtk.Box(halign=Gtk.Align.END, valign=Gtk.Align.END)
+        launch_box.set_margin_bottom(8)
+        launch_box.set_margin_end(8)
+        self._launch_button = Gtk.Button.new_from_icon_name(
+            "media-playback-start-symbolic"
+        )
+        self._launch_button.add_css_class("circular")
+        self._launch_button.add_css_class("suggested-action")
+        self._launch_button.add_css_class("game-launch-button")
+        self._launch_button.set_tooltip_text("Launch game")
+        self._launch_button.connect(
+            "clicked", lambda _button: self.emit("launch-requested", self.game)
+        )
+        launch_box.append(self._launch_button)
+        overlay.add_overlay(launch_box)
+
         return overlay
 
     def _build_menu(self) -> Gtk.Widget:
@@ -131,9 +150,25 @@ class GameCard(Gtk.FlowBoxChild):
         content.set_margin_end(6)
 
         for label, icon_name, signal, css_class in (
-            ("Game details", "dialog-information-symbolic", "details-requested", None),
+            (
+                "Launch game",
+                "media-playback-start-symbolic",
+                "launch-requested",
+                "suggested-action",
+            ),
+            (
+                "Game details",
+                "dialog-information-symbolic",
+                "details-requested",
+                None,
+            ),
             ("Edit game", "document-edit-symbolic", "edit-requested", None),
-            ("Remove from library", "user-trash-symbolic", "remove-requested", "destructive-action"),
+            (
+                "Remove from library",
+                "user-trash-symbolic",
+                "remove-requested",
+                "destructive-action",
+            ),
         ):
             button = Gtk.Button()
             button.add_css_class("flat")
@@ -149,6 +184,8 @@ class GameCard(Gtk.FlowBoxChild):
             button.connect(
                 "clicked", self._on_menu_item_clicked, popover, signal
             )
+            if signal == "launch-requested":
+                self._launch_menu_item = button
             content.append(button)
 
         popover.set_child(content)
@@ -166,12 +203,28 @@ class GameCard(Gtk.FlowBoxChild):
         popover.popdown()
         self.emit(signal_name, self.game)
 
+    def set_status(self, status: str | None) -> None:
+        """Show ``starting``/``running`` state and disable duplicate launches."""
+        if status not in (None, "starting", "running"):
+            raise ValueError(f"Unsupported card status: {status}")
+
+        self._status = status
+        active = status is not None
+        self._running_pill.set_visible(active)
+        if status == "starting":
+            self._running_pill.set_label("Starting")
+        elif status == "running":
+            self._running_pill.set_label("Running")
+
+        self._launch_button.set_sensitive(not active)
+        if self._launch_menu_item is not None:
+            self._launch_menu_item.set_sensitive(not active)
+
     def set_running(self, running: bool) -> None:
-        """Update the optional running badge for future launch integration."""
-        self._running = running
-        self._running_pill.set_visible(running)
+        """Compatibility helper for callers that only know a boolean state."""
+        self.set_status("running" if running else None)
 
     @property
     def running(self) -> bool:
-        """Return the card's current running presentation state."""
-        return self._running
+        """Return the card's current active presentation state."""
+        return self._status is not None

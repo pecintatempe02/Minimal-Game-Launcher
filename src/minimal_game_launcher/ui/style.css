@@ -65,3 +65,14 @@
   min-height: 28px;
   padding: 0;
 }
+
+.game-launch-button {
+  min-width: 38px;
+  min-height: 38px;
+  padding: 0;
+  box-shadow: 0 2px 5px alpha(black, 0.24);
+}
+
+.game-launch-button:disabled {
+  opacity: 0.55;
+}

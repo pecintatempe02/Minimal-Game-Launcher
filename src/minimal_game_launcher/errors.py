@@ -17,3 +17,19 @@ class GameValidationError(LauncherError):
 
 class GameNotFoundError(LauncherError):
     """Raised when a requested library entry no longer exists."""
+
+
+class LaunchError(LauncherError):
+    """Base class for errors that prevent a game process from starting."""
+
+
+class WineNotFoundError(LaunchError):
+    """Raised when system or configured custom Wine cannot be used."""
+
+
+class PrefixInitializationError(LaunchError):
+    """Raised when ``wineboot`` cannot initialize a game's Wine prefix."""
+
+
+class ProcessLaunchError(LaunchError):
+    """Raised when the operating system refuses to create a process."""

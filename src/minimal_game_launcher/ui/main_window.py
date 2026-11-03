@@ -16,28 +16,48 @@ from minimal_game_launcher.services.game_manager import (  # noqa: E402
     SORT_RECENT,
     GameManager,
 )
+from minimal_game_launcher.services.launch_manager import (  # noqa: E402
+    LaunchManager,
+)
+from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 from minimal_game_launcher.ui.game_card import GameCard  # noqa: E402
 from minimal_game_launcher.ui.game_details_dialog import GameDetailsDialog  # noqa: E402
 from minimal_game_launcher.ui.game_editor_dialog import GameEditorDialog  # noqa: E402
+from minimal_game_launcher.ui.settings_dialog import SettingsDialog  # noqa: E402
 
 
 class MainWindow(Adw.ApplicationWindow):
-    """Responsive library grid with search, sorting, and CRUD actions.
+    """Responsive library grid with search, sorting, launch, and CRUD actions.
 
-    The window owns presentation state only. Search, sorting, validation, and
-    persistence are delegated to ``GameManager``.
+    The window owns presentation state only. Search, sorting, validation,
+    persistence, and process management are delegated to their services.
     """
 
-    def __init__(self, application: Adw.Application, manager: GameManager) -> None:
+    def __init__(
+        self,
+        application: Adw.Application,
+        manager: GameManager,
+        launch_manager: LaunchManager,
+        settings_store: SettingsStore,
+    ) -> None:
         super().__init__(application=application)
         self._manager = manager
+        self._launch_manager = launch_manager
+        self._settings_store = settings_store
         self._active_editor: GameEditorDialog | None = None
         self._active_details: GameDetailsDialog | None = None
+        self._active_settings: SettingsDialog | None = None
         self._active_alert: Adw.AlertDialog | None = None
+        self._cards_by_id: dict[str, GameCard] = {}
 
         self.set_title("Minimal Game Launcher")
         self.set_default_size(1100, 720)
         self.set_content(self._build_ui())
+
+        self._launch_manager.connect("launch-started", self._on_launch_started)
+        self._launch_manager.connect("launch-finished", self._on_launch_finished)
+        self._launch_manager.connect("launch-failed", self._on_launch_failed)
+
         self._refresh_library()
 
     def _build_ui(self) -> Gtk.Widget:
@@ -49,6 +69,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._search_entry.set_max_width_chars(48)
         self._search_entry.connect("search-changed", self._on_search_changed)
         header.set_title_widget(self._search_entry)
+
+        settings_button = Gtk.Button.new_from_icon_name("emblem-system-symbolic")
+        settings_button.set_tooltip_text("Settings")
+        settings_button.set_valign(Gtk.Align.CENTER)
+        settings_button.connect("clicked", lambda _button: self._open_settings())
+        header.pack_end(settings_button)
 
         self._sort_dropdown = Gtk.DropDown.new_from_strings(
             ["Name", "Recently added"]
@@ -119,11 +145,15 @@ class MainWindow(Adw.ApplicationWindow):
             games = []
 
         self._flowbox.remove_all()
+        self._cards_by_id = {}
         for game in games:
             card = GameCard(game)
+            card.connect("launch-requested", self._on_launch_requested)
             card.connect("details-requested", self._on_details_requested)
             card.connect("edit-requested", self._on_edit_requested)
             card.connect("remove-requested", self._on_remove_requested)
+            card.set_status(self._launch_manager.status(game.id))
+            self._cards_by_id[game.id] = card
             self._flowbox.append(card)
 
         if games:
@@ -159,6 +189,9 @@ class MainWindow(Adw.ApplicationWindow):
         if isinstance(child, GameCard):
             self._show_details(child.game)
 
+    def _on_launch_requested(self, _card: GameCard, game: Game) -> None:
+        self._launch_game(game)
+
     def _on_details_requested(self, _card: GameCard, game: Game) -> None:
         self._show_details(game)
 
@@ -168,12 +201,66 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_remove_requested(self, _card: GameCard, game: Game) -> None:
         self._confirm_remove(game)
 
+    def _launch_game(self, game: Game) -> None:
+        if self._launch_manager.is_active(game.id):
+            self._set_card_status(game.id, self._launch_manager.status(game.id))
+            self._toast(f"{game.name} is already starting or running")
+            return
+
+        if not self._launch_manager.launch(game):
+            self._toast(f"{game.name} is already starting or running")
+            return
+
+        self._set_card_status(game.id, "starting")
+        self._toast(f"Starting {game.name}…")
+
+    def _on_launch_started(
+        self, _manager: LaunchManager, game_id: str, _pid: int
+    ) -> None:
+        self._set_card_status(game_id, "running")
+        self._toast(f"Launched {self._game_name(game_id)}")
+
+    def _on_launch_finished(
+        self, _manager: LaunchManager, game_id: str, exit_code: int
+    ) -> None:
+        self._set_card_status(game_id, None)
+        name = self._game_name(game_id)
+        if exit_code == 0:
+            self._toast(f"{name} exited")
+        else:
+            self._toast(f"{name} exited with code {exit_code}")
+
+    def _on_launch_failed(
+        self, _manager: LaunchManager, game_id: str, message: str
+    ) -> None:
+        self._set_card_status(game_id, None)
+        self._show_error(message, heading="Game could not start")
+
+    def _set_card_status(self, game_id: str, status: str | None) -> None:
+        card = self._cards_by_id.get(game_id)
+        if card is not None:
+            card.set_status(status)
+
+    def _game_name(self, game_id: str) -> str:
+        game = self._manager.get_game(game_id)
+        return game.name if game is not None else "The game"
+
     def _show_details(self, game: Game) -> None:
         dialog = GameDetailsDialog(game)
+        dialog.connect("launch-requested", self._on_details_launch_requested)
         dialog.connect("edit-requested", self._on_details_edit_requested)
         dialog.connect("remove-requested", self._on_details_remove_requested)
         self._active_details = dialog
         dialog.present(self)
+
+    def _on_details_launch_requested(
+        self, dialog: GameDetailsDialog, game: Game
+    ) -> None:
+        # Close the modal details view so launch progress and any error dialog
+        # are visible over the library grid.
+        self._active_details = None
+        dialog.close()
+        self._launch_game(game)
 
     def _on_details_edit_requested(self, dialog: GameDetailsDialog, game: Game) -> None:
         self._active_details = None
@@ -203,9 +290,23 @@ class MainWindow(Adw.ApplicationWindow):
         self._refresh_library()
         self._toast(f"Saved {game.name}")
 
+    def _open_settings(self) -> None:
+        dialog = SettingsDialog(self, self._settings_store)
+        dialog.connect("saved", self._on_settings_saved)
+        self._active_settings = dialog
+        dialog.present(self)
+
+    def _on_settings_saved(
+        self, _dialog: SettingsDialog, _settings: object
+    ) -> None:
+        self._active_settings = None
+        self._toast("Settings saved")
+
     def _confirm_remove(self, game: Game) -> None:
         # Removal is intentionally framed as removing a library entry, not
-        # deleting game data. GameManager performs no filesystem operation.
+        # deleting game data. GameManager performs no filesystem operation, so
+        # the executable, installation directory, Wine prefix, and shared cover
+        # files are all preserved.
         dialog = Adw.AlertDialog(
             heading="Remove from library?",
             body=(
@@ -253,8 +354,10 @@ class MainWindow(Adw.ApplicationWindow):
         toast.set_timeout(3)
         self._toast_overlay.add_toast(toast)
 
-    def _show_error(self, message: str) -> None:
-        dialog = Adw.AlertDialog(heading="Something went wrong", body=message)
+    def _show_error(
+        self, message: str, *, heading: str = "Something went wrong"
+    ) -> None:
+        dialog = Adw.AlertDialog(heading=heading, body=message)
         dialog.add_response("close", "Close")
         dialog.set_default_response("close")
         dialog.set_close_response("close")

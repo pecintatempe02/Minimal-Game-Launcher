@@ -20,6 +20,7 @@ class GameDetailsDialog(Adw.Dialog):
     """
 
     __gsignals__ = {
+        "launch-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "edit-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "remove-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
     }
@@ -55,9 +56,14 @@ class GameDetailsDialog(Adw.Dialog):
         header.pack_end(remove)
 
         edit = Gtk.Button(label="Edit")
-        edit.add_css_class("suggested-action")
         edit.connect("clicked", self._on_edit_clicked)
         header.pack_end(edit)
+
+        launch = Gtk.Button(label="Launch")
+        launch.add_css_class("suggested-action")
+        launch.set_tooltip_text("Launch this game")
+        launch.connect("clicked", self._on_launch_clicked)
+        header.pack_end(launch)
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(header)
@@ -97,6 +103,9 @@ class GameDetailsDialog(Adw.Dialog):
             )
 
         return toolbar
+
+    def _on_launch_clicked(self, _button: Gtk.Button) -> None:
+        self.emit("launch-requested", self._game)
 
     def _on_edit_clicked(self, _button: Gtk.Button) -> None:
         self.emit("edit-requested", self._game)

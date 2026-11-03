@@ -13,10 +13,18 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, Gtk  # noqa: E402
 
-from minimal_game_launcher import APP_ID, APP_NAME  # noqa: E402
+from minimal_game_launcher import APP_ID  # noqa: E402
 from minimal_game_launcher.database import Database  # noqa: E402
-from minimal_game_launcher.paths import ensure_data_directory, database_path, prefixes_directory  # noqa: E402
+from minimal_game_launcher.logging_setup import configure_logging  # noqa: E402
+from minimal_game_launcher.paths import (  # noqa: E402
+    database_path,
+    ensure_data_directory,
+    prefixes_directory,
+    settings_path,
+)
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
+from minimal_game_launcher.services.launch_manager import LaunchManager  # noqa: E402
+from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 from minimal_game_launcher.ui.main_window import MainWindow  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
@@ -32,28 +40,51 @@ class MinimalGameLauncherApplication(Adw.Application):
         )
         self._database: Database | None = None
         self._manager: GameManager | None = None
+        self._launch_manager: LaunchManager | None = None
+        self._settings_store: SettingsStore | None = None
         self._window: MainWindow | None = None
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
+        configure_logging()
+        LOGGER.info("Starting Minimal Game Launcher")
         Gtk.Window.set_default_icon_name(APP_ID)
         self._load_css()
 
         ensure_data_directory()
         self._database = Database(database_path())
         self._manager = GameManager(self._database, prefixes_directory())
+        self._settings_store = SettingsStore(settings_path())
+        # The launch manager reads settings before each Windows launch, so a
+        # change in the settings dialog applies without restarting the app.
+        self._launch_manager = LaunchManager(
+            prefixes_directory(), self._settings_store
+        )
 
     def do_activate(self) -> None:
         if self._window is None:
-            if self._manager is None:
-                raise RuntimeError("Application started without a game manager.")
-            self._window = MainWindow(self, self._manager)
+            if self._manager is None or self._launch_manager is None:
+                raise RuntimeError("Application started without its services.")
+            if self._settings_store is None:
+                raise RuntimeError("Application started without settings.")
+            self._window = MainWindow(
+                self,
+                self._manager,
+                self._launch_manager,
+                self._settings_store,
+            )
         self._window.present()
 
     def do_shutdown(self) -> None:
+        if self._launch_manager is not None:
+            # Stop main-loop monitoring only. Running games are not terminated
+            # and their prefixes remain untouched.
+            self._launch_manager.shutdown()
+            self._launch_manager = None
         if self._database is not None:
             self._database.close()
             self._database = None
+        LOGGER.info("Minimal Game Launcher stopped")
         Adw.Application.do_shutdown(self)
 
     def _load_css(self) -> None:
