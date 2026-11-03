@@ -14,7 +14,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, Gtk  # noqa: E402
 
 from minimal_game_launcher import APP_ID  # noqa: E402
-from minimal_game_launcher.database import Database  # noqa: E402
+from minimal_game_launcher.database import Database, open_library  # noqa: E402
 from minimal_game_launcher.logging_setup import configure_logging  # noqa: E402
 from minimal_game_launcher.paths import (  # noqa: E402
     covers_directory,
@@ -47,6 +47,7 @@ class MinimalGameLauncherApplication(Adw.Application):
             flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
         )
         self._database: Database | None = None
+        self._recovered_library: Path | None = None
         self._manager: GameManager | None = None
         self._launch_manager: LaunchManager | None = None
         self._performance_manager: PerformanceManager | None = None
@@ -63,7 +64,7 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._load_css()
 
         ensure_data_directory()
-        self._database = Database(database_path())
+        self._database, self._recovered_library = open_library(database_path())
         self._manager = GameManager(self._database, prefixes_directory())
         self._settings_store = SettingsStore(settings_path())
         self._performance_manager = PerformanceManager()
@@ -101,6 +102,7 @@ class MinimalGameLauncherApplication(Adw.Application):
                 self._performance_manager,
                 self._cover_manager,
                 self._steamgriddb,
+                recovered_library=self._recovered_library,
             )
         self._window.present()
 

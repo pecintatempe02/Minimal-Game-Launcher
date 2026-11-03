@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -52,6 +54,8 @@ class MainWindow(Adw.ApplicationWindow):
         performance_manager: PerformanceManager,
         cover_manager: CoverManager,
         steamgriddb: SteamGridDBClient,
+        *,
+        recovered_library: Path | None = None,
     ) -> None:
         super().__init__(application=application)
         self._manager = manager
@@ -77,6 +81,15 @@ class MainWindow(Adw.ApplicationWindow):
         self._launch_manager.connect("launch-warning", self._on_launch_warning)
 
         self._refresh_library()
+        if recovered_library is not None:
+            self._show_error(
+                "The library database was damaged and could not be read. "
+                "It has been moved aside, and a new empty library was created.\n\n"
+                f"Damaged file: {recovered_library}\n\n"
+                "Game records in the damaged file are not deleted. Nothing "
+                "is removed from disk.",
+                heading="Library recovered",
+            )
 
     def _build_ui(self) -> Gtk.Widget:
         header = Adw.HeaderBar()

@@ -7,12 +7,17 @@ directories, Wine prefixes, or cover files.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 from minimal_game_launcher.models import Game, Platform
 
+LOGGER = logging.getLogger(__name__)
+
 SCHEMA_VERSION = 2
+_SQLITE_HEADER = b"SQLite format 3\x00"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
@@ -44,10 +49,16 @@ class Database:
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode = WAL")
-        self._connection.execute("PRAGMA busy_timeout = 5000")
-        self._migrate()
+        try:
+            self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA journal_mode = WAL")
+            self._connection.execute("PRAGMA busy_timeout = 5000")
+            self._migrate()
+        except BaseException:
+            self._connection.close()
+            raise
+
+
 
     def _migrate(self) -> None:
         """Create or upgrade the schema using SQLite's user_version marker."""
@@ -200,3 +211,60 @@ class Database:
     def close(self) -> None:
         """Close the SQLite connection."""
         self._connection.close()
+
+
+def _lacks_sqlite_header(path: Path) -> bool:
+    """Return True for a non-empty file that does not start with SQLite's header.
+
+    Checked before SQLite opens the file, because a failed open can delete the
+    ``-wal`` sidecar on close.
+    """
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(len(_SQLITE_HEADER))
+    except OSError:
+        return False
+    return bool(header) and header != _SQLITE_HEADER
+
+
+def open_library(path: str | Path) -> tuple[Database, Path | None]:
+    """Open the library, setting aside a damaged database instead of crashing.
+
+    A non-empty file without SQLite's header is damaged and is set aside before
+    SQLite opens it. A ``DatabaseError`` from opening a file that has the header
+    (for example page corruption) is also treated as damage. Locked, unreadable,
+    or unopenable files raise ``sqlite3.OperationalError`` and are re-raised
+    untouched, because moving a file another launcher instance may be using
+    would be destructive. A newer schema version raises ``RuntimeError`` and is
+    also re-raised.
+
+    Damaged files are renamed with a UTC timestamp suffix, never deleted. The
+    ``-wal``/``-shm`` sidecars move with them so a stale write-ahead log is not
+    replayed into the new library. For page-level corruption, SQLite may already
+    have checkpointed or removed the ``-wal`` during the failed open, so that
+    log is not guaranteed to survive. Returns the database and the backup path
+    when recovery happened, otherwise ``None``.
+    """
+    target = Path(path).expanduser()
+    if _lacks_sqlite_header(target):
+        LOGGER.error("Library database %s is not a SQLite file", target)
+        return _set_aside_and_reopen(target)
+    try:
+        return Database(target), None
+    except sqlite3.OperationalError:
+        raise
+    except sqlite3.DatabaseError:
+        LOGGER.exception("Library database %s is damaged", target)
+    return _set_aside_and_reopen(target)
+
+
+def _set_aside_and_reopen(target: Path) -> tuple[Database, Path]:
+    """Rename a damaged library and its sidecars, then create an empty library."""
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    backup = target.with_name(f"{target.name}.damaged-{stamp}")
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(f"{target}{suffix}")
+        if source.exists():
+            source.rename(Path(f"{backup}{suffix}"))
+    LOGGER.warning("Damaged library moved to %s; starting an empty library", backup)
+    return Database(target), backup
