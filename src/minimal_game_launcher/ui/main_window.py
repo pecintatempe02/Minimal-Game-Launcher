@@ -45,6 +45,8 @@ class MainWindow(Adw.ApplicationWindow):
     persistence, and process management are delegated to their services.
     """
 
+    SEARCH_DEBOUNCE_MS = 150
+
     def __init__(
         self,
         application: Adw.Application,
@@ -70,6 +72,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._active_cover_dialog: CoverSelectionDialog | None = None
         self._active_alert: Adw.AlertDialog | None = None
         self._cards_by_id: dict[str, GameCard] = {}
+        self._search_source_id = 0
 
         self.set_title("Minimal Game Launcher")
         self.set_default_size(1100, 720)
@@ -159,7 +162,17 @@ class MainWindow(Adw.ApplicationWindow):
         return self._toast_overlay
 
     def _on_search_changed(self, _entry: Gtk.SearchEntry) -> None:
+        # Debounce so each keystroke does not rebuild every card and cover.
+        if self._search_source_id:
+            GLib.source_remove(self._search_source_id)
+        self._search_source_id = GLib.timeout_add(
+            self.SEARCH_DEBOUNCE_MS, self._on_search_debounced
+        )
+
+    def _on_search_debounced(self) -> bool:
+        self._search_source_id = 0
         self._refresh_library()
+        return GLib.SOURCE_REMOVE
 
     def _on_sort_changed(self, _dropdown: Gtk.DropDown, _pspec: object) -> None:
         self._refresh_library()
