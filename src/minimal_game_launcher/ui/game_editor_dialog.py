@@ -30,7 +30,7 @@ from minimal_game_launcher.services.game_manager import GameManager  # noqa: E40
 from minimal_game_launcher.services.performance_manager import (  # noqa: E402
     PerformanceManager,
 )
-from minimal_game_launcher.ui.cover import load_cover_texture  # noqa: E402
+from minimal_game_launcher.ui.cover import DEFAULT_CACHE, load_cover_texture  # noqa: E402
 
 _IMAGE_PATTERNS = (
     "*.png",
@@ -516,6 +516,9 @@ class GameEditorDialog(Adw.Dialog):
             # Only cache-owned files are deleted. Legacy external references
             # and user-owned originals are left untouched.
             self._cover_manager.remove_cover(previous_cover)
+            DEFAULT_CACHE.invalidate(previous_cover)
+        if saved.cover_path:
+            DEFAULT_CACHE.invalidate(saved.cover_path)
 
         self.emit("saved", saved)
         self.close()

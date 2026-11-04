@@ -29,6 +29,7 @@ from minimal_game_launcher.services.steamgriddb import (  # noqa: E402
     SteamGridDBClient,
 )
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
+from minimal_game_launcher.ui.cover import DEFAULT_CACHE  # noqa: E402
 from minimal_game_launcher.ui.cover_selection_dialog import (  # noqa: E402
     CoverSelectionDialog,
 )
@@ -382,12 +383,17 @@ class MainWindow(Adw.ApplicationWindow):
             )
             return
 
+        # The dialog cached a new file and the previous one is removed below.
+        # Drop both from the decoded-texture cache so a rebuilt card cannot
+        # reuse a texture decoded from an earlier version of the same path.
+        DEFAULT_CACHE.invalidate(cover_path)
         if (
             previous_cover
             and previous_cover != updated.cover_path
             and self._cover_manager.is_cached_cover(previous_cover)
         ):
             self._cover_manager.remove_cover(previous_cover)
+            DEFAULT_CACHE.invalidate(previous_cover)
 
         self._refresh_library()
         self._toast(f"Updated cover for {updated.name}")
@@ -410,6 +416,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         if previous_cover and self._cover_manager.is_cached_cover(previous_cover):
             self._cover_manager.remove_cover(previous_cover)
+            DEFAULT_CACHE.invalidate(previous_cover)
 
         self._refresh_library()
         self._toast(f"Removed cover for {updated.name}")

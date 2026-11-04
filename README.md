@@ -235,6 +235,10 @@ README gives no fixed figures.
   only. No live API call has been verified.
 - **Local cover selection** in the cover dialog runs synchronously on the GTK
   thread (bounded to 10 MiB per image).
+- **Cover texture cache.** The in-memory cache is bounded to 64 decoded
+  textures (roughly 45 MiB worst case) and tracks file changes by device,
+  inode, size, and modification time. A cover replaced while it is being
+  decoded is discarded instead of cached, so stale pixels are not served.
 - **Desktop entry hint.** `desktop-file-validate` reports that
   `Categories=Game;Utility` contains more than one main category. The file
   is valid; the hint is kept because the requirement specifies both categories.
@@ -357,6 +361,33 @@ and press **Apply**. **Remove** clears the cover reference.
   is deleted. Legacy references to external files and any file outside the
   cache are left untouched.
 - Writes go to a temporary file first and are then renamed into place.
+
+### Decoded texture cache
+
+Decoded cover images are kept in an in-memory least-recently-used cache so
+that library refreshes, search rebuilds, and dialog previews reuse one
+decoded texture instead of re-decoding the file:
+
+- **Key**: the resolved cover path plus the requested pixel size. The same
+  file at different sizes produces independent entries.
+- **Limit**: at most 64 decoded textures. A card-sized texture is roughly
+  0.7 MiB, which bounds the cache to well under 50 MiB. Loading a 65th image
+  evicts the least-recently-used entry.
+- **Invalidation**: an entry is reused only while the file's device, inode,
+  size, and nanosecond modification time still match the values recorded at
+  decode time. Editing, replacing, or deleting a cover file is picked up on
+  the next request without any explicit refresh; replacing or clearing a cover
+  in the UI also invalidates the affected paths explicitly.
+- **Failure handling**: missing, unreadable, and undecodable files return
+  the placeholder as before; failed loads are not cached, so a file that
+  reappears or becomes readable is decoded again.
+- **Release**: evicted or invalidated textures hold no cache-side reference
+  and are freed as soon as no widget shows them.
+- Decoding runs on the GTK main thread as before (the same thread that
+  builds the cards); the cache only removes duplicate work. There is no
+  background service and no new dependency.
+- The preview of a downloaded SteamGridDB image is decoded straight from
+  memory and is not cached.
 
 ### Validation
 
