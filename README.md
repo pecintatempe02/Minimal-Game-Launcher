@@ -221,6 +221,12 @@ README gives no fixed figures.
 - **No stop-game action.** The launcher can start and monitor games, but it
   cannot terminate them. Closing the launcher stops monitoring and leaves any
   running game running.
+- **Concurrent launcher instances.** Two instances running at the same time
+  (the app does not use single-instance activation) can race around the
+  per-game pidfile: if instance A has just spawned a game but has not yet
+  written its pidfile, instance B's duplicate-launch check can miss it and
+  start a second copy. The race window is milliseconds; resolving it would
+  require pidfile locking (`flock`), which is deliberately deferred.
 - **Keyboard navigation and live GTK interaction were not exercised** in the
   automated tests. The test suite does not drive the GTK window.
 - **MangoHud for Wine** needs 32-bit Vulkan layer support, which the launcher

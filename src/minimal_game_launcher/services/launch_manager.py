@@ -40,6 +40,14 @@ from minimal_game_launcher.models import Game, Platform  # noqa: E402
 from minimal_game_launcher.services.performance_manager import (  # noqa: E402
     PerformanceManager,
 )
+from minimal_game_launcher.services.process_identity import (  # noqa: E402
+    ProcessIdentity,
+    process_identity,
+    read_pidfile,
+    remove_pidfile,
+    verify_process,
+    write_pidfile,
+)
 from minimal_game_launcher.settings import (  # noqa: E402
     LauncherSettings,
     SettingsStore,
@@ -83,10 +91,15 @@ class LaunchSpec:
 
 @dataclass(slots=True)
 class _ActiveLaunch:
-    """A running process tracked by the manager."""
+    """A running process tracked by the manager.
+
+    ``process`` is ``None`` for a reattached game: the launcher did not spawn
+    it in this session and must never signal or reap it.
+    """
 
     game: Game
-    process: subprocess.Popen
+    process: subprocess.Popen | None
+    attached: bool = False
 
 
 class LaunchManager(GObject.Object):
@@ -116,6 +129,7 @@ class LaunchManager(GObject.Object):
         which: WhichFactory | None = None,
         poll_interval_ms: int = 500,
         wineboot_timeout: float = 300.0,
+        pidfiles_root: str | Path | None = None,
     ) -> None:
         super().__init__()
         self._prefixes_root = Path(prefixes_root).expanduser()
@@ -134,15 +148,29 @@ class LaunchManager(GObject.Object):
         self._starting: set[str] = set()
         self._poll_source_id = 0
         self._shutdown = False
+        self._pidfiles_root = (
+            Path(pidfiles_root).expanduser()
+            if pidfiles_root is not None
+            else None
+        )
 
     def launch(self, game: Game) -> bool:
         """Start preparing and launching a game without blocking the UI.
 
-        Returns ``False`` when a launch for this game is already in progress.
+        Returns ``False`` when a launch for this game is already in progress,
+        including when a process left over from a previous launcher session is
+        still reliably identified as running for this game.
         Validation, prefix initialization, and process creation happen on a
         worker thread; their outcome is reported with manager signals.
         """
         if game.id in self._active or game.id in self._starting:
+            return False
+        if self._reattached_pidfile_alive(game.id):
+            LOGGER.info(
+                "Not launching %s: a previous session's process is still "
+                "running",
+                game.name,
+            )
             return False
 
         self._starting.add(game.id)
@@ -224,9 +252,13 @@ class LaunchManager(GObject.Object):
         """Record a spawned process and surface non-fatal launch warnings."""
         self._starting.discard(game.id)
         if self._shutdown:
+            # Keep the pidfile: the game runs on after the launcher exits, and
+            # a later session must be able to reattach to it.
+            self._write_launch_pidfile(game, process.pid)
             return GLib.SOURCE_REMOVE
 
         self._active[game.id] = _ActiveLaunch(game=game, process=process)
+        self._write_launch_pidfile(game, process.pid)
         self._ensure_polling()
         for warning in warnings:
             LOGGER.warning("%s: %s", game.name, warning)
@@ -249,6 +281,13 @@ class LaunchManager(GObject.Object):
 
         finished: list[tuple[str, int]] = []
         for game_id, active in list(self._active.items()):
+            if active.attached or active.process is None:
+                # Reattached games are not our children. Their lifecycle is
+                # tracked through the pidfile identity, not Popen.poll().
+                if self._reattached_pidfile_alive(game_id):
+                    continue
+                finished.append((game_id, 0))
+                continue
             returncode = active.process.poll()
             if returncode is not None:
                 finished.append((game_id, int(returncode)))
@@ -257,6 +296,7 @@ class LaunchManager(GObject.Object):
             active = self._active.pop(game_id, None)
             if active is None:
                 continue
+            self._remove_pidfile(game_id)
             LOGGER.info(
                 "%s exited with status %s", active.game.name, returncode
             )
@@ -266,6 +306,111 @@ class LaunchManager(GObject.Object):
             self._poll_source_id = 0
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
+
+    def _write_launch_pidfile(self, game: Game, pid: int) -> None:
+        """Persist a launch record for later-session reattachment, best effort."""
+        if self._pidfiles_root is None:
+            return
+        identity = process_identity(pid)
+        if identity is None:
+            # The process may have exited between spawn and registration. The
+            # poll loop will observe the exit and clean up normally.
+            LOGGER.debug("No identity snapshot for pid %s", pid)
+            return
+        path = write_pidfile(self._pidfiles_root, identity, game.id)
+        if path is not None:
+            LOGGER.info(
+                "Recorded %s launch as %s", game.name, path.name
+            )
+
+    def _remove_pidfile(self, game_id: str) -> None:
+        """Drop the launch record once the game has exited."""
+        if self._pidfiles_root is None:
+            return
+        remove_pidfile(self._pidfiles_root, game_id)
+
+    def _reattached_pidfile_alive(self, game_id: str) -> bool:
+        """Return whether a pidfile for this game still tracks a live process.
+
+        A stale record (the process exited, the PID was reused, or the file is
+        malformed) is removed here so it cannot block launches forever. An
+        ``inaccessible`` verdict keeps the record and reports the game as
+        potentially running: treating an unreadable process as exited could
+        produce a false exit event or allow a duplicate launch.
+        """
+        if self._pidfiles_root is None:
+            return False
+        identity = read_pidfile(self._pidfiles_root, game_id)
+        if identity is None:
+            return False
+        verdict = verify_process(identity)
+        if verdict == "alive":
+            return True
+        if verdict == "inaccessible":
+            LOGGER.warning(
+                "Keeping launch record for game %s: process %s cannot be "
+                "verified right now",
+                game_id,
+                identity.pid,
+            )
+            return True
+        LOGGER.info(
+            "Discarding stale launch record for game %s (process %s)",
+            game_id,
+            verdict,
+        )
+        self._remove_pidfile(game_id)
+        return False
+
+    def reattach(self, game: Game) -> bool:
+        """Track a game that a previous launcher session started and left running.
+
+        This is read-only reattachment: the process is not a child of this
+        session, so it is never signaled, waited on, or reaped. Returns True
+        when the game is now tracked as running. No signal is emitted: a
+        reattachment is not a launch, and callers surface it through the
+        return value and :meth:`status`.
+        """
+        if game.id in self._active or game.id in self._starting:
+            return False
+        if not self._reattached_pidfile_alive(game.id):
+            return False
+        self._active[game.id] = _ActiveLaunch(
+            game=game, process=None, attached=True
+        )
+        self._ensure_polling()
+        LOGGER.info(
+            "Reattached to running %s from a previous session", game.name
+        )
+        return True
+
+    def shutdown(self) -> None:
+        """Stop monitoring; deliberately leave game processes running.
+
+        Pidfiles are kept so the next session can reattach. Child processes
+        that have already exited are reaped here so they cannot linger as
+        zombies. Nothing is ever signaled.
+        """
+        self._shutdown = True
+        if self._poll_source_id != 0:
+            GLib.source_remove(self._poll_source_id)
+            self._poll_source_id = 0
+        self._starting.clear()
+        reaped: list[str] = []
+        for game_id, active in list(self._active.items()):
+            if active.attached or active.process is None:
+                continue
+            # poll() performs a non-blocking wait, so an exited child is
+            # reaped and cannot become a zombie. A running process is left
+            # alone entirely.
+            if active.process.poll() is not None:
+                reaped.append(game_id)
+        for game_id in reaped:
+            # The child was collected here; its launch record must not
+            # make the next session reattach to a dead PID.
+            self._remove_pidfile(game_id)
+            self._active.pop(game_id, None)
+        self._active.clear()
 
     def status(self, game_id: str) -> str | None:
         """Return ``starting``, ``running``, or ``None`` for a game."""
@@ -282,15 +427,6 @@ class LaunchManager(GObject.Object):
     def is_active(self, game_id: str) -> bool:
         """Return whether a game is starting or running."""
         return game_id in self._active or game_id in self._starting
-
-    def shutdown(self) -> None:
-        """Stop monitoring; deliberately leave game processes running."""
-        self._shutdown = True
-        if self._poll_source_id != 0:
-            GLib.source_remove(self._poll_source_id)
-            self._poll_source_id = 0
-        self._starting.clear()
-        self._active.clear()
 
     def prepare_launch(self, game: Game) -> LaunchSpec:
         """Validate a game and return its complete launch specification.

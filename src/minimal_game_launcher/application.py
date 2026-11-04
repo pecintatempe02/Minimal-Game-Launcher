@@ -22,6 +22,7 @@ from minimal_game_launcher.paths import (  # noqa: E402
     ensure_data_directory,
     prefixes_directory,
     settings_path,
+    state_directory,
 )
 from minimal_game_launcher.services.cover_manager import CoverManager  # noqa: E402
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
@@ -74,10 +75,12 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._steamgriddb = SteamGridDBClient()
         # The launch manager reads settings before each Windows launch, so a
         # change in the settings dialog applies without restarting the app.
+        # Pidfiles record launched games so a later session can reattach.
         self._launch_manager = LaunchManager(
             prefixes_directory(),
             self._settings_store,
             performance_manager=self._performance_manager,
+            pidfiles_root=state_directory() / "processes",
         )
 
     def do_activate(self) -> None:

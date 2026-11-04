@@ -191,6 +191,14 @@ class MainWindow(Adw.ApplicationWindow):
         self._flowbox.remove_all()
         self._cards_by_id = {}
         for game in games:
+            # A game left running by a previous session is adopted read-only:
+            # the card shows Running and duplicate launches are blocked, but
+            # the launcher never signals or reaps the foreign process.
+            if (
+                not self._launch_manager.is_active(game.id)
+                and self._launch_manager.reattach(game)
+            ):
+                self._toast(f"{game.name} is still running")
             card = GameCard(game)
             card.connect("launch-requested", self._on_launch_requested)
             card.connect("details-requested", self._on_details_requested)
