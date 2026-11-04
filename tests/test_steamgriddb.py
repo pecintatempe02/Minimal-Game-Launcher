@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -309,3 +311,168 @@ def test_non_https_images_are_not_returned() -> None:
     client = SteamGridDBClient(urlopen_factory=urlopen)
 
     assert client.search_covers("Game", "key") == []
+
+
+# ---------------------------------------------------------------------------
+# Official API v2.10.0 OpenAPI conformance (verified 2026-11-04 against
+# https://www.steamgriddb.com/static/openapi.yml).
+#
+# The documented Grid schema contains only id, score, style, url, thumb,
+# tags, and author: there are no width or height fields. Mocked responses
+# elsewhere in this file include width/height for legacy reasons; the tests
+# below pin the client's tolerance of the *documented* shape.
+
+
+def test_documented_grid_shape_without_width_height_still_works() -> None:
+    """A response matching the official schema yields "Unknown size"."""
+    grids_payload = {
+        "success": True,
+        "page": 0,
+        "total": 1,
+        "limit": 50,
+        "data": [
+            {
+                "id": 12345,
+                "score": 42,
+                "style": "alternate",
+                "url": "https://cdn2.steamgriddb.com/grid/abc123.png",
+                "thumb": "https://cdn2.steamgriddb.com/thumb/abc123.png",
+                "tags": {},
+                "author": {
+                    "name": "Some Author",
+                    "steam64": "76561190000000000",
+                    "avatar": "https://cdn2.steamgriddb.com/avatar.png",
+                },
+            }
+        ],
+    }
+    urlopen = FakeUrlOpen(
+        _json_response(_search_payload()),
+        _json_response(grids_payload),
+    )
+    client = SteamGridDBClient(urlopen_factory=urlopen)
+
+    results = client.search_covers("My Game", "secret-key")
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.url == "https://cdn2.steamgriddb.com/grid/abc123.png"
+    assert result.thumb_url == "https://cdn2.steamgriddb.com/thumb/abc123.png"
+    assert result.width is None and result.height is None
+    assert result.dimensions == "Unknown size"
+
+
+def test_missing_thumb_falls_back_to_full_image_url() -> None:
+    """thumb is optional in practice; results must keep a usable URL."""
+    grids_payload = {
+        "success": True,
+        "data": [{"id": 1, "url": "https://cdn.example/cover.png"}],
+    }
+    urlopen = FakeUrlOpen(
+        _json_response(_search_payload()),
+        _json_response(grids_payload),
+    )
+    client = SteamGridDBClient(urlopen_factory=urlopen)
+
+    results = client.search_covers("My Game", "key")
+
+    assert results[0].thumb_url == "https://cdn.example/cover.png"
+
+
+def test_pagination_envelope_is_tolerated() -> None:
+    """page/total/limit fields are ignored without breaking parsing."""
+    grids_payload = {
+        "success": True,
+        "page": 0,
+        "total": 150,
+        "limit": 50,
+        "data": [
+            {"id": 1, "url": "https://cdn.example/a.png"},
+            {"id": 2, "url": "https://cdn.example/b.png"},
+        ],
+    }
+    urlopen = FakeUrlOpen(
+        _json_response(_search_payload()),
+        _json_response(grids_payload),
+    )
+    client = SteamGridDBClient(urlopen_factory=urlopen)
+
+    results = client.search_covers("My Game", "key")
+
+    assert [result.url for result in results] == [
+        "https://cdn.example/a.png",
+        "https://cdn.example/b.png",
+    ]
+
+
+def test_live_verified_401_payload_is_understood() -> None:
+    """Live probe (2026-11-04): 401 body {"success": false,
+    "errors": ["Authentication Required"]} arrives as a raised HTTPError,
+    which must map to SteamGridDBAuthError."""
+    error = urllib.error.HTTPError(
+        "https://www.steamgriddb.com/api/v2/search/autocomplete/portal",
+        401,
+        "Unauthorized",
+        FakeHeaders("application/json"),
+        io.BytesIO(
+            json.dumps(
+                {"success": False, "errors": ["Authentication Required"]}
+            ).encode()
+        ),
+    )
+
+    def raise_http_error(*args, **kwargs):
+        raise error
+
+    client = SteamGridDBClient(urlopen_factory=raise_http_error)
+
+    with pytest.raises(SteamGridDBAuthError):
+        client.search_covers("My Game", "invalid-key")
+
+
+def test_invalid_key_format_error_is_reported() -> None:
+    """Live probe (2026-11-04): a malformed key returns
+    {"success": false, "errors": ["Invalid key format"]} with HTTP 401."""
+    error = urllib.error.HTTPError(
+        "https://www.steamgriddb.com/api/v2/search/autocomplete/portal",
+        401,
+        "Unauthorized",
+        FakeHeaders("application/json"),
+        io.BytesIO(
+            json.dumps({"success": False, "errors": ["Invalid key format"]}).encode()
+        ),
+    )
+
+    def raise_http_error(*args, **kwargs):
+        raise error
+
+    client = SteamGridDBClient(urlopen_factory=raise_http_error)
+
+    with pytest.raises(SteamGridDBAuthError):
+        client.search_covers("My Game", "dummy-invalid-key-abc123")
+
+
+def test_search_request_url_matches_documented_endpoint() -> None:
+    """Pin the documented endpoint structure: /search/autocomplete/{term}
+    and /grids/game/{gameId} with documented filter names."""
+    urlopen = FakeUrlOpen(
+        _json_response(_search_payload()),
+        _json_response(_grids_payload()),
+    )
+    client = SteamGridDBClient(urlopen_factory=urlopen)
+    client.search_covers("My Game", "key")
+
+    autocomplete_url = urlopen.requests[0].full_url
+    grids_url = urlopen.requests[1].full_url
+    assert "/api/v2/search/autocomplete/My%20Game" in autocomplete_url
+    assert "/api/v2/grids/game/7?" in grids_url
+    assert "types=static" in grids_url
+    assert "dimensions=" in grids_url
+    # Every requested dimension must exist in the official enum.
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(grids_url).query)
+    requested = query["dimensions"][0].split(",")
+    assert set(requested) <= {
+        "460x215", "920x430", "600x900", "342x482",
+        "660x930", "512x512", "1024x1024",
+    }
+    assert query["types"] == ["static"]

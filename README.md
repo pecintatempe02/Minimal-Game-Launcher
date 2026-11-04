@@ -231,8 +231,13 @@ README gives no fixed figures.
   automated tests. The test suite does not drive the GTK window.
 - **MangoHud for Wine** needs 32-bit Vulkan layer support, which the launcher
   cannot verify. The overlay may not appear for every game or graphics API.
-- **SteamGridDB** response field names were checked against fake responses
-  only. No live API call has been verified.
+- **SteamGridDB** endpoint structure, authentication, and response fields
+  are checked against the official OpenAPI specification (v2.10.0) and
+  unauthenticated error responses. Authenticated responses with real API
+  data have not been observed: the field handling relies on the published
+  schema plus defensive parsing, not on a live key. The optional
+  `width`/`height` grid fields are absent from the official schema and are
+  treated as unknown when missing.
 - **Local cover selection** in the cover dialog runs synchronously on the GTK
   thread (bounded to 10 MiB per image).
 - **Cover texture cache.** The in-memory cache is bounded to 64 decoded
@@ -419,6 +424,37 @@ Every image, whether local or downloaded, must pass these checks:
   downloaded only when you press **Apply**.
 - The preview loads one selected result's thumbnail. It is decoded in memory
   and is not cached.
+
+The integration targets the official SteamGridDB API v2 and was checked
+against the published OpenAPI specification (v2.10.0,
+`https://www.steamgriddb.com/api/v2`) in November 2026:
+
+- **Authentication** (`Authorization: Bearer <key>` header) and the base URL
+  `https://www.steamgriddb.com/api/v2` follow the official spec.
+- **Endpoints**: `GET /search/autocomplete/{term}` for game lookup and
+  `GET /grids/game/{gameId}` for covers, with documented filter parameters
+  (`types=static`, `dimensions=...` from the official enum). Each request
+  carries the `MinimalGameLauncher/<version>` user agent.
+- **Response envelope**: `{ "success": true, "data": [...] }`; games expose
+  `id` and `name` (the spec also lists `types` and `verified`, which the
+  launcher ignores). Covers expose `url`, `thumb`, `style`, `score`, `tags`,
+  and `author` in the official schema. The launcher reads `url` and `thumb`
+  and treats `width`/`height` as optional extras: real responses may omit
+  them, in which case the size label reads "Unknown size".
+- **Errors**: the API answers `{"success": false, "errors": [...]}` with
+  HTTP 401 for missing or invalid keys (live-verified: "Authentication
+  Required" for no key, "Invalid key format" for a malformed key). The
+  launcher maps 401/403 to an authentication error, 429 to a rate-limit
+  message, and everything else to a readable HTTP-status message.
+- **Pagination**: grids responses may include `page`, `total`, and `limit`
+  fields. The launcher reads the first page only (the default page size is
+  50) and caps what it shows at 24 results; it never pages through the rest.
+- **Image handling**: cover URLs must be HTTPS. The thumbnail is used for
+  the preview, the full image only after Apply. Downloads are limited to
+  10 MiB, restricted to PNG/JPEG/WebP content types, and validated by
+  GdkPixbuf before being cached.
+- **Timeouts**: each request has a 15-second timeout; socket and timeout
+  failures are reported as network problems.
 
 ### Error handling
 
