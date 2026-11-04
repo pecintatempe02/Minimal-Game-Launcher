@@ -108,6 +108,8 @@ PYTHONPATH=src python3 -m minimal_game_launcher
   The `STEAMGRIDDB_API_KEY` environment variable is used as a fallback.
 - Cover cache: `$XDG_DATA_HOME/minigame-launcher/covers/`.
 - Diagnostic log: `$XDG_STATE_HOME/minigame-launcher/launcher.log`.
+- Themes: `$XDG_CONFIG_HOME/Minimalist-Game-Launcher/themes.ini` (optional;
+  see [Themes](#themes)).
 
 On startup, a Phase 2 database stored under the old
 `minimal-game-launcher` directory is copied once to the current directory. The
@@ -124,6 +126,7 @@ new per-game performance toggles and their documented defaults.
 | Settings | `$XDG_CONFIG_HOME/minigame-launcher/settings.json` |
 | SteamGridDB key (optional) | `$XDG_CONFIG_HOME/minigame-launcher/steamgriddb.key` (mode `0600`) |
 | Diagnostic log | `$XDG_STATE_HOME/minigame-launcher/launcher.log` (rotating) |
+| Themes (optional) | `$XDG_CONFIG_HOME/Minimalist-Game-Launcher/themes.ini` |
 | Damaged library backups | `library.db.damaged-<UTC timestamp>` next to `library.db` |
 
 Program files live under `~/.local/lib/minimal-game-launcher/` and
@@ -142,6 +145,8 @@ tar -C ~ -czf minigame-launcher-backup.tar.gz \
 The archive includes the library, Wine prefixes, covers, settings, and the API
 key file. To back up library metadata only, add
 `--exclude=.local/share/minigame-launcher/prefixes` before the archive name.
+Theme configuration lives outside these directories; add
+`.config/Minimalist-Game-Launcher` to the archive if you use it.
 
 To restore, close the launcher, move the existing directories aside, and
 extract the archive:
@@ -216,6 +221,148 @@ Removing a game deletes only its library record. Files on disk are untouched.
 Resource use depends on the machine, library size, and cover sizes, so this
 README gives no fixed figures.
 
+## Themes
+
+Themes are standalone and optional. The launcher reads:
+
+```
+$XDG_CONFIG_HOME/Minimalist-Game-Launcher/themes.ini
+```
+
+(normally `~/.config/Minimalist-Game-Launcher/themes.ini`). This file is
+independent of `settings.json` and of any desktop theme system.
+
+### Format
+
+```ini
+[theme]
+active = obsidian-rose
+appearance = system
+
+[obsidian-rose]
+name = Obsidian Rose
+accent = #922a5a
+accent-hover = #b13a6f
+background = #121014
+surface = #1c1920
+surface-elevated = #26222b
+text = #f3eef2
+text-muted = #a9a1ac
+border = #3a333e
+success = #4caf6d
+warning = #d9a441
+danger = #d9534f
+
+[evernight]
+name = Evernight
+accent = #b22222
+```
+
+- `[theme] active` names the section to use; `appearance` is `system`, `dark`,
+  or `light` (the legacy key `mode` is accepted too).
+- Every other section is a theme. The section name is its id; `name` is the
+  label shown in Settings. Ids are matched case-insensitively.
+- `theme` and `colors` are reserved section names. `[theme]` is the settings
+  section, and `[colors]` alone is the older single-theme layout. The importer
+  gives reserved or ambiguous desktop theme names a stable digest suffix
+  (for example `colors-1a2b3c4d`) so distinct names cannot collide.
+- Colors accept `#rgb` and `#rrggbb`, with `-` or `_` in key names
+  (`accent-hover` and `accent_hover` are the same key).
+- `background`, `surface`, `surface-elevated`, `text`, `text-muted`, and
+  `border` are optional. Omitting them inherits libadwaita's light/dark
+  palette, which keeps `system` and forced light/dark usable.
+- `accent`, `accent-hover`, `success`, `warning`, and `danger` fall back to the
+  built-in palette when omitted or invalid.
+
+### Appearance
+
+`appearance` is independent of the palette. `system` follows the desktop's
+color scheme through libadwaita's `Adw.StyleManager`; `dark` and `light` force
+it. Switching appearance keeps the selected accent. No GNOME Shell dependency
+is involved: on a desktop that does not report a scheme, `system` simply keeps
+libadwaita's default, which is the same behavior GTK apps have there today.
+
+### Adding a theme
+
+Add a section and point `active` at it, or pick it in **Settings →
+Appearance**. Theme and appearance choices apply and save as soon as they are
+selected; the Settings button is **Close**, not Cancel, because there is
+nothing to roll back. Wine settings still use **Save**.
+
+The built-in `default` theme always exists and is the fallback for a missing
+file, a malformed file, or an unknown `active` value on startup.
+
+### Live reload
+
+The launcher watches `themes.ini` with `Gio.FileMonitor` and reloads on
+external edits and atomic replacements, debounced by 250 ms. A reload only
+regenerates the CSS provider and re-applies the appearance mode: it does not
+reload the database, rebuild the grid, decode covers, touch Wine, or restart
+the launcher.
+
+If the configuration directory does not exist yet, the launcher creates it and
+watches for the file to appear; it never creates `themes.ini` on its own. If
+the file becomes malformed, contains no theme, names a theme that does not
+exist, or sets an unknown `appearance`, the last valid palette *and* appearance
+stay in effect and the launcher keeps running; it recovers when the file is
+valid again. A stylesheet that GTK rejects never replaces the last valid one,
+and a rejected stylesheet does not change the saved selection. The monitor is
+cancelled on shutdown.
+
+### Fallback and troubleshooting
+
+- No `themes.ini`: built-in palette, `system` appearance.
+- Malformed file at startup: startup continues with the built-in palette and a
+  warning in the diagnostic log. During a live reload the last valid theme is
+  kept instead.
+- Unknown `active`: falls back to `default` and logs a warning at startup; a
+  live reload ignores the file until it is fixed.
+- Unknown `appearance`: the whole reload is ignored so the last valid
+  appearance stays in effect; startup falls back to `system` with a warning.
+- Invalid color: that key is ignored and its default is used.
+- Not writable: Settings still applies the choice for the session and shows an
+  error; the file is not modified.
+- Unparsable file: the writer refuses to modify it rather than appending a
+  duplicate `[theme]` section, and reports the error.
+
+Choices made in Settings are written by editing only the affected `[theme]`
+lines, so comments and other themes survive. Writes are atomic (temporary file
+in the same directory, then `os.replace`) and preserve:
+
+- a symlinked `themes.ini` (the resolved target is updated, the symlink stays),
+- the existing file mode,
+- CRLF or LF line endings,
+- a UTF-8 BOM, if present.
+
+Line endings, BOM, and permissions are preserved; arbitrary formatting inside
+the edited `[theme]` section is not rewritten byte-for-byte (a trailing comment
+on the edited line is dropped, and a missing `[theme]` section is appended at
+the end). A newly created file starts with a short comment header. A legacy
+single-theme `theme.ini` in the same directory is read as a base layer and
+never rewritten.
+
+### Optional desktop theme integration
+
+`scripts/mgl-theme-import` maps a desktop theme's `color.ini` onto the
+semantic keys and writes one section into `themes.ini`. It is opt-in, run
+manually or from your own theme-switching script:
+
+```sh
+scripts/mgl-theme-import --active
+```
+
+The launcher itself never reads `~/.config/themes/`. The helper drops the
+desktop file's alpha-first `#AARRGGBB` byte so channels are not swapped, never
+modifies the source `color.ini`, preserves unrelated sections and comments,
+and gives reserved or ambiguous directory names a stable digest suffix so
+distinct theme names never overwrite one another. Imported display names are
+flattened to a single line before being written, so metadata cannot inject
+sections or settings. `--active` updates both `active = value` and `active:
+value` forms without leaving duplicate keys. It uses the same tested writers as
+the application. A malformed existing `themes.ini` is refused with a non-zero
+exit code and left byte-identical; a successful import produces a file the
+launcher can parse.
+
 ## Known limitations
 
 - **No stop-game action.** The launcher can start and monitor games, but it
@@ -249,6 +396,16 @@ README gives no fixed figures.
   is valid; the hint is kept because the requirement specifies both categories.
 - **No packaging for other distributions.** The installer is a plain
   user-level script, not a package.
+- **Theme visuals were not verified pixel by pixel.** Theme CSS is generated
+  and accepted by GTK, the provider lifecycle and live reload are tested, and
+  the settings dialog is constructed on a real display, but no screenshot or
+  visual regression check was run. `system` appearance follows libadwaita; on
+  desktops that do not report a color scheme it stays at libadwaita's default.
+- **Theme writes preserve structure, not every byte of formatting.** Symlinks,
+  file mode, CRLF/LF, and a UTF-8 BOM are preserved, and every other section
+  and comment is passed through unchanged. Only the edited `[theme]` line is
+  rewritten (a trailing comment on that line is dropped), and a file with no
+  `[theme]` section gets one appended rather than reordered.
 
 ## Tests
 
@@ -259,6 +416,16 @@ pytest
 The tests use temporary databases, fake subprocesses, and a headless GLib main
 loop. They do not launch real Wine or real games, access the network, or modify
 system files.
+
+Theme tests cover configuration parsing and persistence with real files, CSS
+generation parsed by a real `Gtk.CssProvider`, and live reload with real
+`Gio.FileMonitor` objects. Display registration
+(`Gtk.StyleContext.add_provider_for_display`) is mocked so the suite runs
+without a compositor; the settings dialog is constructed for real when a GDK
+display is available and skipped otherwise. The importer tests run
+`scripts/mgl-theme-import` as a subprocess against a temporary
+`XDG_CONFIG_HOME`, so the written file is parsed by the application's own
+loader.
 
 ## Library behavior
 

@@ -1,5 +1,7 @@
-/* Theme-adaptive styling for the game library. Colors come from libadwaita
- * named colors so the launcher follows the system light/dark appearance. */
+/* Theme-adaptive styling for the game library. Colors come from the generated
+ * theme palette (@mgl_* aliases) which itself falls back to libadwaita named
+ * colors, so the launcher follows the system light/dark appearance unless the
+ * active theme pins its own surfaces. */
 
 .game-card-child {
   padding: 4px;
@@ -7,18 +9,18 @@
 }
 
 .game-card {
-  background-color: @card_bg_color;
+  background-color: @mgl_surface;
   border-radius: 12px;
   padding: 8px;
   box-shadow: 0 1px 2px alpha(black, 0.10);
 }
 
 .game-card-child:selected .game-card {
-  box-shadow: inset 0 0 0 2px @accent_color, 0 1px 2px alpha(black, 0.12);
+  box-shadow: inset 0 0 0 2px @mgl_accent, 0 1px 2px alpha(black, 0.12);
 }
 
 .cover-frame {
-  background-color: @card_bg_color;
+  background-color: @mgl_surface;
   border-radius: 8px;
 }
 
@@ -59,7 +61,7 @@
 }
 
 .game-card-menu {
-  background-color: alpha(@window_bg_color, 0.86);
+  background-color: alpha(@mgl_background, 0.86);
   border-radius: 999px;
   min-width: 28px;
   min-height: 28px;

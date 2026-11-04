@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Import a desktop palette into the launcher's themes.ini (opt-in).
+
+This helper is never called by the launcher. Run it manually, or from your own
+``switch-theme`` script, after the desktop theme changes::
+
+    scripts/mgl-theme-import --active
+
+It reads ``$XDG_CONFIG_HOME/themes/current`` (a symlink to a theme directory),
+takes that directory's ``color.ini``, maps its palette onto the launcher's
+semantic keys, and writes one section into ``themes.ini``. Everything else in
+``themes.ini`` — comments, other themes, the active selection — is preserved.
+
+The launcher itself never reads the desktop theme files; this script is the
+only bridge, and it only ever writes the launcher's own configuration. Source
+theme files are opened read-only and are never modified.
+
+Desktop colors are ``#AARRGGBB`` (alpha first). GTK CSS is ``#RRGGBB`` or
+``#RRGGBBAA``, so the alpha byte is dropped here instead of silently becoming
+a red channel.
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import os
+import re
+import sys
+from pathlib import Path
+
+# The launcher package is used for INI writing so the app and this helper cannot
+# drift apart. The script normally lives in a source checkout's ``scripts/``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from minimal_game_launcher.themes import (  # noqa: E402
+    read_theme_text,
+    replace_section,
+    sanitize_theme_name,
+    set_option,
+    theme_identifier,
+    write_theme_file,
+)
+
+THEME_SECTION = "theme"
+
+#: Desktop ``color.ini`` key -> launcher semantic key.
+COLOR_MAP = {
+    "bg": "background",
+    "surface": "surface",
+    "surfaceelevated": "surface-elevated",
+    "border": "border",
+    "text": "text",
+    "textmuted": "text-muted",
+    "accent": "accent",
+    "accentmuted": "accent-hover",
+    "success": "success",
+    "warning": "warning",
+    "danger": "danger",
+}
+
+HEX_COLOR = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+
+def config_home() -> Path:
+    """Return the XDG config home."""
+    configured = os.environ.get("XDG_CONFIG_HOME")
+    return Path(configured).expanduser() if configured else Path.home() / ".config"
+
+
+def default_output() -> Path:
+    """Return the launcher's theme file path."""
+    return config_home() / "Minimalist-Game-Launcher" / "themes.ini"
+
+
+def parse_color(value: str) -> str | None:
+    """Return ``#rrggbb``, dropping an alpha-first byte when present."""
+    candidate = value.strip()
+    if not HEX_COLOR.match(candidate):
+        return None
+    digits = candidate[1:]
+    if len(digits) == 8:  # #AARRGGBB
+        digits = digits[2:]
+    elif len(digits) == 3:
+        digits = "".join(character * 2 for character in digits)
+    return "#" + digits.lower()
+
+
+def read_desktop_theme(theme_dir: Path) -> tuple[str, dict[str, str]]:
+    """Return the display name and mapped colors from ``color.ini``."""
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        parser.read(theme_dir / "color.ini", encoding="utf-8")
+    except (OSError, UnicodeError, configparser.Error) as error:
+        raise SystemExit(f"error: cannot read {theme_dir / 'color.ini'}: {error}")
+    if not parser.has_section("colors"):
+        raise SystemExit(f"No [colors] section in {theme_dir / 'color.ini'}")
+
+    name = ""
+    if parser.has_section("meta"):
+        name = (parser.get("meta", "name", fallback="") or "").strip()
+    name = name or theme_dir.name
+
+    colors: dict[str, str] = {}
+    for key, value in parser.items("colors"):
+        target = COLOR_MAP.get(key.strip().casefold())
+        if target is None:
+            continue
+        parsed = parse_color(value)
+        if parsed is not None:
+            colors[target] = parsed
+    if not colors:
+        raise SystemExit(
+            f"No usable colors in {theme_dir / 'color.ini'}; nothing to import"
+        )
+    return name, colors
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the importer and report what was written."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--themes-root",
+        type=Path,
+        default=config_home() / "themes",
+        help="directory containing the 'current' symlink (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--theme",
+        help="theme directory name; defaults to what 'current' points at",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=default_output(),
+        help="launcher themes.ini to update (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--active",
+        action="store_true",
+        help="also make the imported theme the active launcher theme",
+    )
+    args = parser.parse_args(argv)
+
+    if args.theme:
+        theme_dir = args.themes_root / args.theme
+    else:
+        current = args.themes_root / "current"
+        if not current.exists():
+            print(f"error: {current} does not exist", file=sys.stderr)
+            return 1
+        theme_dir = current.resolve()
+    if not (theme_dir / "color.ini").is_file():
+        print(f"error: no color.ini in {theme_dir}", file=sys.stderr)
+        return 1
+
+    name, colors = read_desktop_theme(theme_dir)
+    # Reserved/ambiguous directory names get a deterministic digest suffix, so
+    # distinct theme names never overwrite one another.
+    theme_id = theme_identifier(theme_dir.name)
+    name = sanitize_theme_name(name) or theme_id
+
+    body = [f"name = {name}"]
+    body.extend(f"{key} = {value}" for key, value in colors.items())
+
+    try:
+        text = read_theme_text(args.output)
+        if text.strip():
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            try:
+                parser.read_string(text)
+            except configparser.Error as error:
+                print(
+                    f"error: refusing to modify unparsable {args.output}: {error}",
+                    file=sys.stderr,
+                )
+                return 1
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        text = replace_section(text, theme_id, body)
+        if args.active:
+            text = set_option(text, THEME_SECTION, "active", theme_id)
+        write_theme_file(args.output, text)
+    except OSError as error:
+        print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+        return 1
+
+    print(f"Imported {name!r} as [{theme_id}] into {args.output}")
+    if not args.active:
+        print(f"Activate it with: --active (or set active = {theme_id})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

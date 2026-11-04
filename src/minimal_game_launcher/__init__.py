@@ -5,6 +5,9 @@ APP_NAME = "Minimal Game Launcher"
 APP_VERSION = "0.5.0"
 DATA_DIRECTORY_NAME = "minigame-launcher"
 LEGACY_DATA_DIRECTORY_NAME = "minimal-game-launcher"
+#: Theme configuration lives in its own directory so the standalone theme file
+#: stays independent of the launcher's settings directory.
+THEME_DIRECTORY_NAME = "Minimalist-Game-Launcher"
 
 __all__ = [
     "APP_ID",
@@ -12,4 +15,5 @@ __all__ = [
     "APP_VERSION",
     "DATA_DIRECTORY_NAME",
     "LEGACY_DATA_DIRECTORY_NAME",
+    "THEME_DIRECTORY_NAME",
 ]

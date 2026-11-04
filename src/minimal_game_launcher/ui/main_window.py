@@ -37,6 +37,7 @@ from minimal_game_launcher.ui.game_card import GameCard  # noqa: E402
 from minimal_game_launcher.ui.game_details_dialog import GameDetailsDialog  # noqa: E402
 from minimal_game_launcher.ui.game_editor_dialog import GameEditorDialog  # noqa: E402
 from minimal_game_launcher.ui.settings_dialog import SettingsDialog  # noqa: E402
+from minimal_game_launcher.ui.theme import ThemeController  # noqa: E402
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -57,6 +58,7 @@ class MainWindow(Adw.ApplicationWindow):
         performance_manager: PerformanceManager,
         cover_manager: CoverManager,
         steamgriddb: SteamGridDBClient,
+        theme_controller: ThemeController,
         *,
         recovered_library: Path | None = None,
     ) -> None:
@@ -67,6 +69,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._performance_manager = performance_manager
         self._cover_manager = cover_manager
         self._steamgriddb = steamgriddb
+        self._theme_controller = theme_controller
         self._active_editor: GameEditorDialog | None = None
         self._active_details: GameDetailsDialog | None = None
         self._active_settings: SettingsDialog | None = None
@@ -450,10 +453,18 @@ class MainWindow(Adw.ApplicationWindow):
         self._toast(f"Saved {game.name}")
 
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self, self._settings_store)
+        dialog = SettingsDialog(
+            self, self._settings_store, self._theme_controller
+        )
         dialog.connect("saved", self._on_settings_saved)
+        dialog.connect("closed", self._on_settings_closed)
         self._active_settings = dialog
         dialog.present(self)
+
+    def _on_settings_closed(self, _dialog: SettingsDialog) -> None:
+        # Theme changes apply immediately, so the dialog can be dismissed
+        # without saving; drop the reference so it is not kept alive.
+        self._active_settings = None
 
     def _on_settings_saved(
         self, _dialog: SettingsDialog, _settings: object

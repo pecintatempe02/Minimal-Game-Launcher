@@ -1,10 +1,11 @@
 """Resolve application-owned directories according to XDG conventions.
 
 The library database, launcher settings, per-game Wine prefixes, diagnostic
-log, cover cache, and optional SteamGridDB key are kept in separate XDG
-locations. Wine prefixes are located under the data directory but are created
-lazily by the launch manager on a Windows game's first launch. Covers copied
-into the cache are app-owned; the original user-selected images never are.
+log, cover cache, optional SteamGridDB key, and theme file are kept in separate
+XDG locations. Wine prefixes are located under the data directory but are
+created lazily by the launch manager on a Windows game's first launch. Covers
+copied into the cache are app-owned; the original user-selected images never
+are.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 from minimal_game_launcher import (
     DATA_DIRECTORY_NAME,
     LEGACY_DATA_DIRECTORY_NAME,
+    THEME_DIRECTORY_NAME,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -73,6 +75,28 @@ def steamgriddb_key_path() -> Path:
     permissions can be restricted to the current user (mode ``0600``).
     """
     return config_directory() / "steamgriddb.key"
+
+
+def themes_path() -> Path:
+    """Return the standalone theme configuration file.
+
+    Themes live outside the launcher settings directory so the file can be
+    edited, versioned, or generated independently of application state.
+    """
+    return (
+        _xdg_home("XDG_CONFIG_HOME", Path.home() / ".config")
+        / THEME_DIRECTORY_NAME
+        / "themes.ini"
+    )
+
+
+def legacy_theme_path() -> Path:
+    """Return the single-theme file written by earlier builds.
+
+    It is read for compatibility and never rewritten; new choices are saved to
+    :func:`themes_path` so the user's existing file stays byte-identical.
+    """
+    return themes_path().with_name("theme.ini")
 
 
 def covers_directory() -> Path:

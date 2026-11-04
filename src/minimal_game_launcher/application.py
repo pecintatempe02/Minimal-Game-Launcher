@@ -20,9 +20,11 @@ from minimal_game_launcher.paths import (  # noqa: E402
     covers_directory,
     database_path,
     ensure_data_directory,
+    legacy_theme_path,
     prefixes_directory,
     settings_path,
     state_directory,
+    themes_path,
 )
 from minimal_game_launcher.services.cover_manager import CoverManager  # noqa: E402
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
@@ -35,6 +37,7 @@ from minimal_game_launcher.services.steamgriddb import (  # noqa: E402
 )
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 from minimal_game_launcher.ui.main_window import MainWindow  # noqa: E402
+from minimal_game_launcher.ui.theme import ThemeController  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +58,7 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._settings_store: SettingsStore | None = None
         self._cover_manager: CoverManager | None = None
         self._steamgriddb: SteamGridDBClient | None = None
+        self._theme_controller: ThemeController | None = None
         self._window: MainWindow | None = None
 
     def do_startup(self) -> None:
@@ -63,6 +67,13 @@ class MinimalGameLauncherApplication(Adw.Application):
         LOGGER.info("Starting Minimal Game Launcher")
         Gtk.Window.set_default_icon_name(APP_ID)
         self._load_css()
+        # The generated theme provider must come after the static stylesheet so
+        # its @define-color overrides win. A missing or invalid themes.ini only
+        # falls back to the built-in palette; it never blocks startup.
+        self._theme_controller = ThemeController(
+            themes_path(), legacy_theme_path()
+        )
+        self._theme_controller.start()
 
         ensure_data_directory()
         self._database, self._recovered_library = open_library(database_path())
@@ -97,6 +108,8 @@ class MinimalGameLauncherApplication(Adw.Application):
                 raise RuntimeError(
                     "Application started without cover services."
                 )
+            if self._theme_controller is None:
+                raise RuntimeError("Application started without its theme.")
             self._window = MainWindow(
                 self,
                 self._manager,
@@ -105,11 +118,17 @@ class MinimalGameLauncherApplication(Adw.Application):
                 self._performance_manager,
                 self._cover_manager,
                 self._steamgriddb,
+                self._theme_controller,
                 recovered_library=self._recovered_library,
             )
         self._window.present()
 
     def do_shutdown(self) -> None:
+        if self._theme_controller is not None:
+            # Remove the CSS provider and cancel the file monitor and any
+            # pending reload timer. No library or game state is touched.
+            self._theme_controller.shutdown()
+            self._theme_controller = None
         if self._launch_manager is not None:
             # Stop main-loop monitoring only. Running games are not terminated
             # and their prefixes remain untouched.
