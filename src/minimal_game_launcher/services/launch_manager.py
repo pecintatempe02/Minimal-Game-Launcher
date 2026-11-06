@@ -36,10 +36,18 @@ from minimal_game_launcher.errors import (  # noqa: E402
     PrefixInitializationError,
     WineNotFoundError,
 )
-from minimal_game_launcher.models import Game, Platform  # noqa: E402
+from minimal_game_launcher.models import (  # noqa: E402
+    Game,
+    Platform,
+    is_bare_command,
+)
 from minimal_game_launcher.services.performance_manager import (  # noqa: E402
     PerformanceManager,
 )
+from minimal_game_launcher.services.prefix_lock import (  # noqa: E402
+    shared_prefix_lock,
+)
+from minimal_game_launcher.services.prefixes import shared_prefix_path  # noqa: E402
 from minimal_game_launcher.services.process_identity import (  # noqa: E402
     ProcessIdentity,
     process_identity,
@@ -65,16 +73,20 @@ WhichFactory = Callable[[str], str | None]
 
 
 def prefix_is_initialized(path: str | Path) -> bool:
-    """Return whether a Wine prefix appears ready for reuse.
+    """Return whether a prefix is marked ready and still structurally valid.
 
-    ``system.reg`` is created by Wine itself. The marker is also accepted so an
-    older or custom prefix that was successfully initialized can be reused
-    without running ``wineboot`` again.
+    The marker is written only after a successful ``wineboot`` and validation,
+    so a file that Wine created before failing or timing out is never reused.
+    Prefixes without a marker, including those from earlier MGL versions, are
+    treated as not ready; the next launch runs ``wineboot -u`` on them once,
+    which is idempotent and does not delete any data.
     """
     prefix = Path(path).expanduser()
-    return (prefix / "system.reg").is_file() or (
-        prefix / PREFIX_READY_MARKER
-    ).is_file()
+    return (
+        (prefix / PREFIX_READY_MARKER).is_file()
+        and (prefix / "system.reg").is_file()
+        and (prefix / "drive_c").is_dir()
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,7 +460,9 @@ class LaunchManager(GObject.Object):
                 raise LaunchError("The Wine prefix could not be determined.")
             # Every process for a Windows game receives its own WINEPREFIX in
             # its environment; global Wine configuration is never modified.
-            environment = self.build_environment(Platform.WINDOWS, prefix)
+            environment = self.build_environment(
+                Platform.WINDOWS, prefix, game.environment
+            )
             base_command = (wine_executable, str(executable), *arguments)
             plan = self._performance_manager.compose(
                 game, base_command, environment
@@ -464,7 +478,9 @@ class LaunchManager(GObject.Object):
 
         # Native games are executed directly. Removing an inherited WINEPREFIX
         # prevents an accidental Wine environment from affecting the process.
-        environment = self.build_environment(Platform.LINUX, None)
+        environment = self.build_environment(
+            Platform.LINUX, None, game.environment
+        )
         base_command = (str(executable), *arguments)
         plan = self._performance_manager.compose(
             game, base_command, environment
@@ -484,12 +500,30 @@ class LaunchManager(GObject.Object):
         if not raw_executable:
             raise LaunchError("The game executable path is empty.")
 
-        try:
-            executable = Path(raw_executable).expanduser().resolve(strict=False)
-        except (OSError, RuntimeError) as error:
-            raise LaunchError(
-                f"The game executable path could not be resolved: {raw_executable}"
-            ) from error
+        if game.platform is Platform.LINUX and is_bare_command(raw_executable):
+            # Resolve through PATH without a shell. The stored command name is
+            # left intact; only this launch uses the located path.
+            located = self._which(raw_executable)
+            if not located:
+                raise LaunchError(
+                    f"The command was not found in PATH: {raw_executable}"
+                )
+            try:
+                executable = Path(located).expanduser().resolve(strict=False)
+            except (OSError, RuntimeError) as error:
+                raise LaunchError(
+                    f"The command path could not be resolved: {located}"
+                ) from error
+        else:
+            try:
+                executable = Path(raw_executable).expanduser().resolve(
+                    strict=False
+                )
+            except (OSError, RuntimeError) as error:
+                raise LaunchError(
+                    f"The game executable path could not be resolved: "
+                    f"{raw_executable}"
+                ) from error
 
         if not executable.exists():
             raise LaunchError(
@@ -519,11 +553,19 @@ class LaunchManager(GObject.Object):
     ) -> Path:
         """Resolve and validate the directory used as the process working dir."""
         raw_directory = game.working_directory.strip()
+        if raw_directory:
+            default_directory = executable.parent
+        elif is_bare_command(game.executable.strip()):
+            # A command resolved from PATH has no meaningful parent. Start it
+            # in the user's home directory rather than /usr/bin.
+            default_directory = Path.home()
+        else:
+            default_directory = executable.parent
         try:
             directory = (
                 Path(raw_directory).expanduser().resolve(strict=False)
                 if raw_directory
-                else executable.parent
+                else default_directory
             )
         except (OSError, RuntimeError) as error:
             raise LaunchError(
@@ -558,10 +600,21 @@ class LaunchManager(GObject.Object):
 
     @staticmethod
     def build_environment(
-        platform: Platform, prefix_path: str | Path | None = None
+        platform: Platform,
+        prefix_path: str | Path | None = None,
+        game_environment: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        """Construct a child environment without changing global Wine state."""
+        """Merge inherited, per-game, and launcher-managed values.
+
+        The inherited environment is always the base, so configured variables
+        extend it rather than replacing it. Launcher-managed values are applied
+        last; reserved keys are rejected during validation and dropped here as
+        defence in depth.
+        """
         environment = dict(os.environ)
+        for key, value in (game_environment or {}).items():
+            if key not in {"WINEPREFIX", "MANGOHUD"}:
+                environment[key] = value
         if platform is Platform.WINDOWS:
             if prefix_path is None:
                 raise ValueError("A Wine prefix is required for Windows games.")
@@ -628,12 +681,32 @@ class LaunchManager(GObject.Object):
 
         Prefix creation is lazy: registration never calls this method. The
         prefix directory is app-owned and is not removed with the library entry.
+        Shared-prefix initialization is serialized so two concurrent first
+        launches cannot race; an already initialized prefix is always reused.
         """
         if game.platform is not Platform.WINDOWS:
             return None
 
+        if game.wine_prefix_shared:
+            # _ensure_prefix re-checks readiness, so a launcher that waited on the
+            # lock reuses the prefix the other process just initialized.
+            with shared_prefix_lock(self._prefixes_root):
+                return self._ensure_prefix(
+                    game, wine_executable, working_directory
+                )
+        return self._ensure_prefix(game, wine_executable, working_directory)
+
+    def _ensure_prefix(
+        self,
+        game: Game,
+        wine_executable: str,
+        working_directory: str | Path | None,
+    ) -> str:
+        """Create or reuse one prefix; the caller has checked the platform."""
         if game.wine_prefix_path and game.wine_prefix_path.strip():
             prefix = Path(game.wine_prefix_path).expanduser()
+        elif game.wine_prefix_shared:
+            prefix = shared_prefix_path(self._prefixes_root)
         else:
             # Older records or manually created entries may lack a stored path.
             # Deriving it from the unique game ID still guarantees separation.
@@ -721,6 +794,12 @@ class LaunchManager(GObject.Object):
         if not prefix.is_dir():
             raise PrefixInitializationError(
                 f"Wine did not create the prefix directory: {prefix}"
+            )
+        if not ((prefix / "system.reg").is_file() and (prefix / "drive_c").is_dir()):
+            # Exit status 0 alone is not proof; without these the prefix is unusable.
+            raise PrefixInitializationError(
+                "wineboot finished but the Wine prefix is incomplete "
+                f"(missing system.reg or drive_c): {prefix}"
             )
 
         try:

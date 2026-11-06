@@ -8,8 +8,11 @@ from types import SimpleNamespace
 import gi
 
 gi.require_version("GdkPixbuf", "2.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
 
-from gi.repository import GdkPixbuf  # noqa: E402
+from gi.repository import Adw, Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -18,7 +21,13 @@ from minimal_game_launcher.models import GameDraft, Platform
 from minimal_game_launcher.services.cover_manager import CoverManager
 from minimal_game_launcher.services.game_manager import GameManager
 from minimal_game_launcher.ui.cover import DEFAULT_CACHE, load_cover_texture
+from minimal_game_launcher.ui.game_card import GameCard
 from minimal_game_launcher.ui.main_window import MainWindow
+
+needs_display = pytest.mark.skipif(
+    Gdk.Display.get_default() is None,
+    reason="constructing GTK widgets needs a GDK display",
+)
 
 
 def _draft(executable: Path) -> GameDraft:
@@ -29,10 +38,16 @@ def _draft(executable: Path) -> GameDraft:
     )
 
 
-def _valid_cover(tmp_path: Path, name: str = "cover.png") -> Path:
-    """Write a decodable 32×32 PNG accepted by CoverManager."""
+def _valid_cover(
+    tmp_path: Path,
+    name: str = "cover.png",
+    *,
+    width: int = 32,
+    height: int = 32,
+) -> Path:
+    """Write a decodable PNG accepted by CoverManager."""
     pixbuf = GdkPixbuf.Pixbuf.new(
-        GdkPixbuf.Colorspace.RGB, False, 8, 32, 32
+        GdkPixbuf.Colorspace.RGB, False, 8, width, height
     )
     pixbuf.fill(0xFF0000FF)
     success, buffer = pixbuf.save_to_bufferv("png", [], [])
@@ -40,6 +55,108 @@ def _valid_cover(tmp_path: Path, name: str = "cover.png") -> Path:
     path = tmp_path / name
     path.write_bytes(bytes(buffer))
     return path
+
+
+@needs_display
+@pytest.mark.parametrize("window_size", [(753, 794), (620, 650)])
+def test_game_card_cover_stays_contained_in_its_fixed_frame(
+    manager: GameManager,
+    make_executable,
+    tmp_path: Path,
+    window_size: tuple[int, int],
+) -> None:
+    cover = _valid_cover(tmp_path, width=320, height=120)
+    game = manager.add_game(
+        GameDraft(
+            name="Touhou 15.5 Antinomy of Common Flowers",
+            platform=Platform.LINUX,
+            executable=str(make_executable()),
+            cover_path=str(cover),
+        )
+    )
+
+    card = GameCard(game)
+    content = card.get_child()
+    overlay = content.get_first_child()
+    frame = overlay.get_child()
+    picture = frame.get_first_child().get_next_sibling()
+
+    assert picture.get_content_fit() == Gtk.ContentFit.COVER
+    assert card.get_halign() == Gtk.Align.START
+    assert card.get_hexpand() is False
+    assert content.get_halign() == Gtk.Align.START
+    assert picture.get_can_shrink() is True
+    assert picture.get_size_request() == (
+        GameCard.COVER_WIDTH,
+        GameCard.COVER_HEIGHT,
+    )
+    assert frame.get_size_request() == (
+        GameCard.COVER_WIDTH,
+        GameCard.COVER_HEIGHT,
+    )
+    assert all(
+        not widget.get_hexpand() and not widget.get_vexpand()
+        for widget in (content, overlay, frame, picture)
+    )
+
+    second_game = manager.add_game(
+        GameDraft(
+            name="PlantsVsZombies",
+            platform=Platform.WINDOWS,
+            executable=str(make_executable("second-game.exe")),
+        )
+    )
+    third_game = manager.add_game(
+        GameDraft(
+            name="Osu",
+            platform=Platform.LINUX,
+            executable=str(make_executable("third-game")),
+        )
+    )
+
+    css = Gtk.CssProvider()
+    css.load_from_data(
+        b".game-card-child { padding: 0; } .game-card { padding: 8px; }"
+    )
+    display = Gdk.Display.get_default()
+    Gtk.StyleContext.add_provider_for_display(
+        display, css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+    flow = Gtk.FlowBox()
+    flow.set_homogeneous(False)
+    flow.set_column_spacing(0)
+    flow.set_row_spacing(0)
+    flow.set_valign(Gtk.Align.START)
+    flow.set_halign(Gtk.Align.START)
+    flow.set_max_children_per_line(12)
+    flow.set_min_children_per_line(1)
+    cards = [card, GameCard(second_game), GameCard(third_game)]
+    for game_card in cards:
+        flow.append(game_card)
+
+    library_content = Adw.Clamp()
+    library_content.set_maximum_size(1100)
+    library_content.set_tightening_threshold(800)
+    library_content.set_child(flow)
+
+    scroller = Gtk.ScrolledWindow()
+    scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroller.set_child(library_content)
+    window = Gtk.Window()
+    window.set_default_size(*window_size)
+    window.set_child(scroller)
+    window.present()
+    loop = GLib.MainLoop()
+    GLib.timeout_add(350, lambda: (loop.quit(), GLib.SOURCE_REMOVE)[1])
+    loop.run()
+    try:
+        assert card.get_width() <= GameCard.COVER_WIDTH + 64
+        allocations = [game_card.get_allocation() for game_card in cards]
+        assert allocations[1].x - allocations[0].x == allocations[0].width
+        assert allocations[2].x - allocations[1].x == allocations[1].width
+    finally:
+        window.close()
+        Gtk.StyleContext.remove_provider_for_display(display, css)
 
 
 def test_new_game_id_is_unique(manager: GameManager) -> None:

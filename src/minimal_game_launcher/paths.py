@@ -5,7 +5,8 @@ log, cover cache, optional SteamGridDB key, and theme file are kept in separate
 XDG locations. Wine prefixes are located under the data directory but are
 created lazily by the launch manager on a Windows game's first launch. Covers
 copied into the cache are app-owned; the original user-selected images never
-are.
+are. The managed game-installation and installer-staging roots are created by
+the installer workflow only when needed, never at startup.
 """
 
 from __future__ import annotations
@@ -16,12 +17,17 @@ import shutil
 from pathlib import Path
 
 from minimal_game_launcher import (
+    APP_ID,
     DATA_DIRECTORY_NAME,
     LEGACY_DATA_DIRECTORY_NAME,
     THEME_DIRECTORY_NAME,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+#: Directory name used for the one managed shared prefix. It starts with a dot,
+#: which no valid game ID may do, so it can never collide with a per-game path.
+SHARED_PREFIX_DIRECTORY_NAME = ".shared"
 
 
 def _xdg_home(environment_variable: str, fallback: Path) -> Path:
@@ -53,6 +59,11 @@ def prefixes_directory() -> Path:
     belongs to the launch manager.
     """
     return data_directory() / "prefixes"
+
+
+def shared_prefix_directory() -> Path:
+    """Return the stable path of the managed shared Wine prefix."""
+    return prefixes_directory() / SHARED_PREFIX_DIRECTORY_NAME
 
 
 def config_directory() -> Path:
@@ -106,6 +117,55 @@ def covers_directory() -> Path:
     writes into the user's original image directory.
     """
     return data_directory() / "covers"
+
+
+def games_directory() -> Path:
+    """Return the root for MGL-managed game installations.
+
+    A game's managed installation is ``<games>/<game-id>``. The directory is
+    created only when the user explicitly chooses the managed destination; the
+    installer's default Wine destination needs no game directory.
+    """
+    return data_directory() / "games"
+
+
+def installers_directory() -> Path:
+    """Return the root for MGL-managed installer staging data.
+
+    A game's staging area is ``<installers>/<game-id>`` and is created when an
+    installation reaches staging.
+    """
+    return data_directory() / "installers"
+
+
+def applications_directory() -> Path:
+    """Return the user-level XDG application directory for desktop entries."""
+    return _data_home() / "applications"
+
+
+def desktop_entry_path() -> Path:
+    """Return the canonical user-level desktop entry path for this application."""
+    return applications_directory() / f"{APP_ID}.desktop"
+
+
+def icons_directory() -> Path:
+    """Return the user-level scalable hicolor icon directory."""
+    return _data_home() / "icons" / "hicolor" / "scalable" / "apps"
+
+
+def desktop_icon_path() -> Path:
+    """Return the canonical user-level icon path for this application."""
+    return icons_directory() / f"{APP_ID}.svg"
+
+
+def system_application_directories() -> tuple[Path, ...]:
+    """Return XDG system application directories in precedence order."""
+    configured = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    return tuple(
+        Path(entry).expanduser() / "applications"
+        for entry in configured.split(":")
+        if entry.strip()
+    )
 
 
 def state_directory() -> Path:

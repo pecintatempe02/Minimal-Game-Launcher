@@ -31,6 +31,7 @@ from minimal_game_launcher.services.steamgriddb import (  # noqa: E402
     SteamGridDBClient,
 )
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
+from minimal_game_launcher.ui.lifecycle import DialogSignalOwner  # noqa: E402
 from minimal_game_launcher.ui.cover import (  # noqa: E402
     load_cover_texture,
     load_cover_texture_from_bytes,
@@ -41,7 +42,7 @@ LOGGER = logging.getLogger(__name__)
 _IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.webp")
 
 
-class CoverSelectionDialog(Adw.Dialog):
+class CoverSelectionDialog(Adw.Dialog, DialogSignalOwner):
     """Choose a cached cover from a local file or an online search result."""
 
     __gsignals__ = {
@@ -78,6 +79,7 @@ class CoverSelectionDialog(Adw.Dialog):
         self.set_can_close(True)
         self.set_child(self._build_ui())
         self._refresh_selection_state()
+        self._init_dialog_lifecycle()
 
     @property
     def game(self) -> Game:
@@ -94,19 +96,23 @@ class CoverSelectionDialog(Adw.Dialog):
 
         cancel = Gtk.Button(label="Cancel")
         cancel.add_css_class("flat")
-        cancel.connect("clicked", lambda _button: self.close())
+        self.connect_owned(cancel, "clicked", self._on_cancel_clicked)
         header.pack_start(cancel)
 
         self._apply_button = Gtk.Button(label="Apply")
         self._apply_button.add_css_class("suggested-action")
-        self._apply_button.connect("clicked", self._on_apply_clicked)
+        self.connect_owned(
+            self._apply_button, "clicked", self._on_apply_clicked
+        )
         header.pack_end(self._apply_button)
 
         self._remove_button = Gtk.Button(label="Remove")
         self._remove_button.add_css_class("destructive-action")
         self._remove_button.set_tooltip_text("Remove the current cover")
         self._remove_button.set_visible(bool(self._game.cover_path))
-        self._remove_button.connect("clicked", self._on_remove_clicked)
+        self.connect_owned(
+            self._remove_button, "clicked", self._on_remove_clicked
+        )
         header.pack_end(self._remove_button)
 
         toolbar = Adw.ToolbarView()
@@ -126,7 +132,7 @@ class CoverSelectionDialog(Adw.Dialog):
 
         manual_button = Gtk.Button(label="Choose a local image…")
         manual_button.set_halign(Gtk.Align.START)
-        manual_button.connect("clicked", self._choose_local_image)
+        self.connect_owned(manual_button, "clicked", self._choose_local_image)
         left.append(manual_button)
         self._local_button = manual_button
 
@@ -137,11 +143,15 @@ class CoverSelectionDialog(Adw.Dialog):
         )
         self._search_entry.set_text(self._game.name)
         self._search_entry.set_hexpand(True)
-        self._search_entry.connect("activate", self._on_search_activated)
+        self.connect_owned(
+            self._search_entry, "activate", self._on_search_activated
+        )
         search_row.append(self._search_entry)
 
         self._search_button = Gtk.Button(label="Search")
-        self._search_button.connect("clicked", self._on_search_clicked)
+        self.connect_owned(
+            self._search_button, "clicked", self._on_search_clicked
+        )
         search_row.append(self._search_button)
         left.append(search_row)
 
@@ -169,7 +179,9 @@ class CoverSelectionDialog(Adw.Dialog):
         self._results = Gtk.ListBox()
         self._results.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self._results.set_activate_on_single_click(True)
-        self._results.connect("row-selected", self._on_result_selected)
+        self.connect_owned(
+            self._results, "row-selected", self._on_result_selected
+        )
         results_scroller = Gtk.ScrolledWindow()
         results_scroller.set_policy(
             Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC
@@ -199,7 +211,10 @@ class CoverSelectionDialog(Adw.Dialog):
         self._preview_stack.add_named(empty_preview, "empty")
 
         self._preview_picture = Gtk.Picture()
+        self._preview_picture.set_can_shrink(True)
         self._preview_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self._preview_picture.set_hexpand(False)
+        self._preview_picture.set_vexpand(False)
         self._preview_stack.add_named(self._preview_picture, "preview")
         self._preview_stack.set_visible_child_name("empty")
         preview_box.append(self._preview_stack)
@@ -250,6 +265,21 @@ class CoverSelectionDialog(Adw.Dialog):
         self._results_by_row.clear()
         self._selected_result = None
         self._refresh_selection_state()
+
+    def _on_cancel_clicked(self, _button: Gtk.Button) -> None:
+        self.close()
+
+    def _release_dialog_references(self) -> None:
+        """Drop preview, result, and callback references after closing."""
+        # Late worker callbacks compare these tokens and stop touching widgets.
+        self._search_token += 1
+        self._preview_token += 1
+        self._results_by_row.clear()
+        self._selected_local = None
+        self._selected_result = None
+        self._active_file_dialog = None
+        self._active_error = None
+        self._preview_picture.set_paintable(None)
 
     def _on_search_activated(self, _entry: Gtk.SearchEntry) -> None:
         self._start_search()

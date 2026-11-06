@@ -3,19 +3,39 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
+import shutil
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 
 from minimal_game_launcher.database import Database
 from minimal_game_launcher.errors import GameNotFoundError, GameValidationError
-from minimal_game_launcher.models import Game, GameDraft, Platform
+from minimal_game_launcher.models import (
+    Game,
+    GameDraft,
+    Platform,
+    is_bare_command,
+)
+from minimal_game_launcher.services.prefixes import (
+    assign_prefix,
+    load_strategy,
+    shared_reference_guard,
+)
+from minimal_game_launcher.settings import SettingsStore, WinePrefixStrategy
 
 SORT_NAME = "name"
 SORT_RECENT = "recent"
 VALID_SORTS = frozenset({SORT_NAME, SORT_RECENT})
+
+_WhichFactory = Callable[[str], str | None]
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# The launcher owns these values during launch. Allowing a stored override
+# would let a per-game environment change Wine isolation or MangoHud state.
+_RESERVED_ENVIRONMENT = frozenset({"WINEPREFIX", "MANGOHUD"})
 
 
 def _utc_now() -> str:
@@ -31,9 +51,18 @@ class GameManager:
     Windows game may be registered before Wine is installed or initialized.
     """
 
-    def __init__(self, database: Database, prefixes_root: str | Path) -> None:
+    def __init__(
+        self,
+        database: Database,
+        prefixes_root: str | Path,
+        *,
+        which: _WhichFactory | None = None,
+        settings_store: SettingsStore | None = None,
+    ) -> None:
         self._database = database
         self._prefixes_root = Path(prefixes_root).expanduser()
+        self._which = which or shutil.which
+        self._settings_store = settings_store
 
     @staticmethod
     def split_launch_arguments(arguments: str) -> list[str]:
@@ -52,13 +81,64 @@ class GameManager:
             ) from error
 
     @staticmethod
+    def parse_environment(text: str) -> dict[str, str]:
+        """Parse ``KEY=VALUE`` lines without shell evaluation.
+
+        Blank lines and ``#`` comments are ignored. Keys must be valid POSIX
+        environment names, duplicates are rejected, and the launcher-managed
+        keys are reserved. Values are not shell-evaluated; surrounding
+        whitespace is trimmed.
+        """
+        parsed: dict[str, str] = {}
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if "=" not in line:
+                raise GameValidationError(
+                    f"Environment line {line_number} must use KEY=VALUE.",
+                    field="environment",
+                )
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not _ENV_KEY.fullmatch(key):
+                raise GameValidationError(
+                    f"Environment line {line_number} has an invalid variable "
+                    "name. Use letters, digits, and underscores, and do not "
+                    "start with a digit.",
+                    field="environment",
+                )
+            if key in _RESERVED_ENVIRONMENT:
+                raise GameValidationError(
+                    f"The variable {key} is managed by the launcher and cannot "
+                    "be set per game.",
+                    field="environment",
+                )
+            if key in parsed:
+                raise GameValidationError(
+                    f"The variable {key} is defined more than once.",
+                    field="environment",
+                )
+            if "\x00" in value:
+                raise GameValidationError(
+                    f"The value for {key} contains an invalid NUL character.",
+                    field="environment",
+                )
+            parsed[key] = value
+        return parsed
+
+    @staticmethod
     def default_working_directory(executable: str) -> str:
         """Suggest the executable's parent directory for the form field."""
         if not executable.strip():
             return ""
+        if is_bare_command(executable.strip()):
+            return ""
         return str(Path(executable).expanduser().parent)
 
-    def _normalize_draft(self, draft: GameDraft) -> GameDraft:
+    def _normalize_draft(
+        self, draft: GameDraft
+    ) -> tuple[GameDraft, dict[str, str]]:
         """Validate all user-controlled paths and launch fields."""
         name = draft.name.strip()
         if not name:
@@ -72,11 +152,29 @@ class GameManager:
         if not raw_executable:
             raise GameValidationError("Game executable is required.", field="executable")
 
-        executable = Path(raw_executable).expanduser()
-        if not executable.is_absolute():
-            executable = executable.resolve()
+        command = draft.platform is Platform.LINUX and is_bare_command(
+            raw_executable
+        )
+        if command:
+            located = self._which(raw_executable)
+            if not located:
+                raise GameValidationError(
+                    f"Command not found in PATH: {raw_executable}",
+                    field="executable",
+                )
+            executable = Path(located).resolve(strict=False)
+            # Keep the command name exactly as typed. Resolution happens at
+            # launch time so a PATH change is honoured and the saved value is
+            # never silently rewritten to a different command.
+            stored_executable = raw_executable
         else:
-            executable = executable.resolve(strict=False)
+            executable = Path(raw_executable).expanduser()
+            if not executable.is_absolute():
+                executable = executable.resolve()
+            else:
+                executable = executable.resolve(strict=False)
+            stored_executable = str(executable)
+
         if not executable.exists():
             raise GameValidationError(
                 f"Game executable does not exist: {executable}",
@@ -124,9 +222,16 @@ class GameManager:
                     field="working_directory",
                 )
             working_directory = candidate
+        # A bare command has no meaningful parent folder. Leaving the field
+        # empty keeps the launch-time default rather than guessing /usr/bin.
+        stored_working_directory = (
+            "" if command and not raw_working_directory
+            else str(working_directory)
+        )
 
         launch_arguments = draft.launch_arguments.strip()
         self.split_launch_arguments(launch_arguments)
+        environment = self.parse_environment(draft.environment)
 
         cover_path: str | None = None
         if draft.cover_path and draft.cover_path.strip():
@@ -137,20 +242,55 @@ class GameManager:
                 Path(draft.cover_path).expanduser().resolve(strict=False)
             )
 
-        return replace(
-            draft,
-            name=name,
-            executable=str(executable),
-            working_directory=str(working_directory),
-            launch_arguments=launch_arguments,
-            cover_path=cover_path,
+        return (
+            replace(
+                draft,
+                name=name,
+                executable=stored_executable,
+                working_directory=stored_working_directory,
+                launch_arguments=launch_arguments,
+                environment="",
+                cover_path=cover_path,
+            ),
+            environment,
         )
 
-    def _prefix_for(self, game_id: str, platform: Platform, existing: str | None) -> str | None:
-        """Return the dedicated prefix path without creating the directory."""
+    def _lifecycle_guard(
+        self, platform: Platform, existing: str | None, existing_shared: bool = False
+    ):
+        """Hold the shared-prefix lifecycle lock when a reference may be written.
+
+        Only a Windows game with no stored prefix can be assigned a new shared
+        reference. Existing paths are preserved as-is and need no lock.
+        """
+        may_assign_shared = (
+            platform is Platform.WINDOWS
+            and not existing
+            and not existing_shared
+            and load_strategy(self._settings_store) is WinePrefixStrategy.SHARED
+        )
+        return shared_reference_guard(self._prefixes_root, may_assign_shared)
+
+    def _prefix_for(
+        self,
+        game_id: str,
+        platform: Platform,
+        existing: str | None,
+        existing_shared: bool = False,
+    ) -> tuple[str | None, bool]:
+        """Return the prefix path and shared flag without creating anything.
+
+        An existing path is always preserved. Only a new Windows game follows
+        the current strategy.
+        """
         if platform is Platform.LINUX:
-            return None
-        return existing or str(self._prefixes_root / game_id)
+            return None, False
+        if existing:
+            return existing, existing_shared
+        assignment = assign_prefix(
+            self._prefixes_root, game_id, load_strategy(self._settings_store)
+        )
+        return assignment.path, assignment.shared
 
     @staticmethod
     def new_game_id() -> str:
@@ -169,24 +309,113 @@ class GameManager:
         ``game_id`` is optional and intended for the editor's cover flow. When
         omitted the manager generates a new identifier.
         """
-        normalized = self._normalize_draft(draft)
+        normalized, environment = self._normalize_draft(draft)
         game_id = game_id or self.new_game_id()
         timestamp = _utc_now()
-        game = Game(
-            id=game_id,
-            name=normalized.name,
-            platform=normalized.platform,
-            executable=normalized.executable,
-            working_directory=normalized.working_directory,
-            launch_arguments=normalized.launch_arguments,
-            cover_path=normalized.cover_path,
-            wine_prefix_path=self._prefix_for(game_id, normalized.platform, None),
-            gamemode_enabled=normalized.gamemode_enabled,
-            mangohud_enabled=normalized.mangohud_enabled,
-            created_at=timestamp,
-            updated_at=timestamp,
-        )
-        self._database.add_game(game)
+        # Assignment and persistence share one lifecycle-locked section when the
+        # new game may reference the shared prefix, so a shared-prefix deletion
+        # cannot slip between them.
+        with self._lifecycle_guard(normalized.platform, None):
+            prefix_path, prefix_shared = self._prefix_for(
+                game_id, normalized.platform, None
+            )
+            game = Game(
+                id=game_id,
+                name=normalized.name,
+                platform=normalized.platform,
+                executable=normalized.executable,
+                working_directory=normalized.working_directory,
+                launch_arguments=normalized.launch_arguments,
+                cover_path=normalized.cover_path,
+                wine_prefix_path=prefix_path,
+                gamemode_enabled=normalized.gamemode_enabled,
+                mangohud_enabled=normalized.mangohud_enabled,
+                created_at=timestamp,
+                updated_at=timestamp,
+                environment=environment,
+                wine_prefix_shared=prefix_shared,
+            )
+            self._database.add_game(game)
+        return game
+
+    def register_installation(
+        self,
+        game_id: str,
+        draft: GameDraft,
+        *,
+        install_directory: str | None,
+        install_directory_owned: bool,
+        installer_source_directory: str | None,
+        installer_source_owned: bool,
+        wine_prefix_path: str | None = None,
+        wine_prefix_shared: bool = False,
+    ) -> Game:
+        """Insert or update a game after its installer has run.
+
+        The caller must have verified ``install_directory_owned`` through the
+        ownership service before setting it. This method only persists the
+        supplied ownership metadata; it does not infer ownership from a path.
+
+        ``wine_prefix_path`` is supplied by an installer session so registration
+        uses the prefix the session actually installed into, even if the
+        strategy changed meanwhile.
+        """
+        normalized, environment = self._normalize_draft(draft)
+        existing = self._database.get_game(game_id)
+        timestamp = _utc_now()
+        # A session-supplied shared path is persisted exactly as the session
+        # recorded it; no strategy is consulted for that case.
+        if wine_prefix_path is not None:
+            already_persisted = (
+                existing is not None
+                and existing.wine_prefix_shared
+                and existing.wine_prefix_path == wine_prefix_path
+            )
+            guard = shared_reference_guard(
+                self._prefixes_root,
+                wine_prefix_shared,
+                new_reference=not already_persisted,
+            )
+        else:
+            guard = self._lifecycle_guard(
+                normalized.platform,
+                existing.wine_prefix_path if existing else None,
+                existing.wine_prefix_shared if existing else False,
+            )
+        with guard:
+            if wine_prefix_path is not None:
+                prefix_path, prefix_shared = wine_prefix_path, wine_prefix_shared
+            else:
+                prefix_path, prefix_shared = self._prefix_for(
+                    game_id,
+                    normalized.platform,
+                    existing.wine_prefix_path if existing else None,
+                    existing.wine_prefix_shared if existing else False,
+                )
+            game = Game(
+                id=game_id,
+                name=normalized.name,
+                platform=normalized.platform,
+                executable=normalized.executable,
+                working_directory=normalized.working_directory,
+                launch_arguments=normalized.launch_arguments,
+                cover_path=normalized.cover_path,
+                wine_prefix_path=prefix_path,
+                gamemode_enabled=normalized.gamemode_enabled,
+                mangohud_enabled=normalized.mangohud_enabled,
+                created_at=existing.created_at if existing else timestamp,
+                updated_at=timestamp,
+                environment=environment,
+                install_directory=install_directory,
+                install_directory_owned=install_directory_owned,
+                installer_source_directory=installer_source_directory,
+                installer_source_owned=installer_source_owned,
+                wine_prefix_shared=prefix_shared,
+            )
+            if existing is None:
+                self._database.add_game(game)
+            elif not self._database.update_game(game):
+                raise GameNotFoundError("This game is no longer in the library.")
         return game
 
     def update_game(self, game_id: str, draft: GameDraft) -> Game:
@@ -195,25 +424,42 @@ class GameManager:
         if existing is None:
             raise GameNotFoundError("This game is no longer in the library.")
 
-        normalized = self._normalize_draft(draft)
-        game = Game(
-            id=existing.id,
-            name=normalized.name,
-            platform=normalized.platform,
-            executable=normalized.executable,
-            working_directory=normalized.working_directory,
-            launch_arguments=normalized.launch_arguments,
-            cover_path=normalized.cover_path,
-            wine_prefix_path=self._prefix_for(
-                existing.id, normalized.platform, existing.wine_prefix_path
-            ),
-            gamemode_enabled=normalized.gamemode_enabled,
-            mangohud_enabled=normalized.mangohud_enabled,
-            created_at=existing.created_at,
-            updated_at=_utc_now(),
-        )
-        if not self._database.update_game(game):
-            raise GameNotFoundError("This game is no longer in the library.")
+        normalized, environment = self._normalize_draft(draft)
+        with self._lifecycle_guard(
+            normalized.platform,
+            existing.wine_prefix_path,
+            existing.wine_prefix_shared,
+        ):
+            prefix_path, prefix_shared = self._prefix_for(
+                existing.id,
+                normalized.platform,
+                existing.wine_prefix_path,
+                existing.wine_prefix_shared,
+            )
+            game = Game(
+                id=existing.id,
+                name=normalized.name,
+                platform=normalized.platform,
+                executable=normalized.executable,
+                working_directory=normalized.working_directory,
+                launch_arguments=normalized.launch_arguments,
+                cover_path=normalized.cover_path,
+                wine_prefix_path=prefix_path,
+                gamemode_enabled=normalized.gamemode_enabled,
+                mangohud_enabled=normalized.mangohud_enabled,
+                created_at=existing.created_at,
+                updated_at=_utc_now(),
+                environment=environment,
+                # Ownership metadata is not edited by the game editor. Preserve it
+                # so a metadata edit never claims or drops ownership of data.
+                install_directory=existing.install_directory,
+                install_directory_owned=existing.install_directory_owned,
+                installer_source_directory=existing.installer_source_directory,
+                installer_source_owned=existing.installer_source_owned,
+                wine_prefix_shared=prefix_shared,
+            )
+            if not self._database.update_game(game):
+                raise GameNotFoundError("This game is no longer in the library.")
         return game
 
     def remove_game(self, game_id: str) -> Game:

@@ -107,6 +107,10 @@ PYTHONPATH=src python3 -m minimal_game_launcher
   `$XDG_CONFIG_HOME/minigame-launcher/steamgriddb.key` (mode `0600`).
   The `STEAMGRIDDB_API_KEY` environment variable is used as a fallback.
 - Cover cache: `$XDG_DATA_HOME/minigame-launcher/covers/`.
+- Installer staging: `$XDG_DATA_HOME/minigame-launcher/installers/{game-id}/`.
+- Managed game installations: `$XDG_DATA_HOME/minigame-launcher/games/{game-id}/`.
+- Optional desktop entry: `$XDG_DATA_HOME/applications/`.
+- Optional desktop icon: `$XDG_DATA_HOME/icons/hicolor/scalable/apps/`.
 - Diagnostic log: `$XDG_STATE_HOME/minigame-launcher/launcher.log`.
 - Themes: `$XDG_CONFIG_HOME/Minimalist-Game-Launcher/themes.ini` (optional;
   see [Themes](#themes)).
@@ -177,6 +181,50 @@ To recover games, stop the launcher and copy the old file back over
 `library.db` (removing the new `-wal`/`-shm` files first). Locked databases,
 unreadable files, and databases with a newer schema version are **not** moved;
 the launcher reports the error instead.
+
+## Installing games
+
+Use the install menu in the header bar:
+
+- **From ISO image…** mounts the image read-only (no root), copies its complete
+  contents into MGL staging, verifies the copy, and unmounts it.
+- **From installer executable…** accepts one standalone Windows `.exe` from any
+  location.
+
+Both flows create a resumable installer session and reuse the same Wine prefix,
+installer launch, executable discovery, and registration paths. Nothing is
+executed until **Run installer** is pressed.
+
+Direct executable mode checks only that the source is a regular, non-empty,
+readable file with a `.exe` suffix and a Windows `MZ` signature. That check does
+not establish that the file is safe, authentic, or a working installer.
+
+- The selected executable is copied into
+  `$XDG_DATA_HOME/minigame-launcher/installers/{game-id}/source/`.
+- Only that file is copied. Standalone installers that need companion `.cab`,
+  `.bin`, or other data files beside them are not supported; use an ISO instead.
+- The original executable is never moved, modified, or deleted.
+- A pre-existing staging directory is never overwritten. A failed copy removes
+  only staging created by that attempt.
+- MSI packages are not supported.
+
+## Desktop launcher entry
+
+**Settings → Application launcher** can show Minimal Game Launcher in the
+application menu. The switch writes or removes only MGL's own user-level entry:
+
+- `$XDG_DATA_HOME/applications/io.github.minimal_game_launcher.MinimalGameLauncher.desktop`
+- `$XDG_DATA_HOME/icons/hicolor/scalable/apps/io.github.minimal_game_launcher.MinimalGameLauncher.svg`
+
+`XDG_DATA_HOME` defaults to `~/.local/share`. The entry carries
+`X-MGL-Managed=true`; MGL never deletes an entry without that marker. Fuzzel,
+Hyprland, and `/usr/share/applications` are never modified. When a packaged
+system entry with the same ID exists, disabling writes a user-level
+`Hidden=true` override so the packaged entry cannot reappear. Enabling replaces
+the override. No per-game desktop entries are created.
+
+If the preference has never been set, startup does not touch the filesystem. A
+failed entry update or settings save is reported without reporting success.
 
 ## Game registration
 
@@ -271,6 +319,10 @@ accent = #b22222
 - `background`, `surface`, `surface-elevated`, `text`, `text-muted`, and
   `border` are optional. Omitting them inherits libadwaita's light/dark
   palette, which keeps `system` and forced light/dark usable.
+- `text` supplies primary foreground colors for window, view, header bar,
+  popover, dialog, and card surfaces. `text-muted` supplies libadwaita's
+  dimmed foreground used by descriptions and secondary labels. Omitting either
+  keeps the corresponding system light/dark color.
 - `accent`, `accent-hover`, `success`, `warning`, and `danger` fall back to the
   built-in palette when omitted or invalid.
 
@@ -396,10 +448,11 @@ launcher can parse.
   is valid; the hint is kept because the requirement specifies both categories.
 - **No packaging for other distributions.** The installer is a plain
   user-level script, not a package.
-- **Theme visuals were not verified pixel by pixel.** Theme CSS is generated
-  and accepted by GTK, the provider lifecycle and live reload are tested, and
-  the settings dialog is constructed on a real display, but no screenshot or
-  visual regression check was run. `system` appearance follows libadwaita; on
+- **Theme visuals are not pixel-regression tested.** Settings was visually
+  checked in dark and light modes with two temporary custom palettes, and the
+  wide-cover layout is checked in GTK at normal and resized window dimensions.
+  Automated tests validate generated CSS and widget allocations, but do not
+  compare screenshot pixels. `system` appearance follows libadwaita; on
   desktops that do not report a color scheme it stays at libadwaita's default.
 - **Theme writes preserve structure, not every byte of formatting.** Symlinks,
   file mode, CRLF/LF, and a UTF-8 BOM are preserved, and every other section
@@ -521,6 +574,9 @@ and press **Apply**. **Remove** clears the cover reference.
   The original image is only read and is never modified or deleted.
 - The game editor follows the same rule: a newly chosen cover is copied when
   you save the game.
+- Library-card thumbnails fill the fixed poster frame proportionally; images
+  with a different aspect ratio are center-cropped, not stretched. The editor
+  and cover-selection previews continue to show the full image without crop.
 
 ### Image cache
 

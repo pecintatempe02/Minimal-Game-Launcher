@@ -12,9 +12,10 @@ import gi
 
 gi.require_version("Gdk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
+gi.require_version("Gtk", "4.0")
 
 import pytest  # noqa: E402
-from gi.repository import GdkPixbuf  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf  # noqa: E402
 
 from minimal_game_launcher.ui.cover import (  # noqa: E402
     DEFAULT_CACHE,
@@ -497,3 +498,181 @@ def test_stats_are_consistent(png_factory) -> None:
     assert stats.loads == stats.hits + stats.misses
     assert stats.evictions == 1
     assert cache.size() == 2
+
+
+# ---------------------------------------------------------------------------
+# Byte budget and pruning
+
+
+def test_byte_budget_evicts_until_under_limit(png_factory) -> None:
+    # Two 64x64 textures fit; the third must evict the least-recently used.
+    budget = 64 * 64 * 4 * 2
+    cache = CoverTextureCache(limit=100, budget_bytes=budget)
+    for index in range(3):
+        cover = png_factory(f"budget-{index}.png", width=64, height=64)
+        cache.load_texture(cover, 64, 64)
+
+    stats = cache.stats()
+    assert cache.bytes_cached() <= budget
+    assert stats.bytes_cached == cache.bytes_cached()
+    assert stats.evictions == 1
+    assert cache.size() == 2
+
+
+def test_byte_budget_counts_each_entry(png_factory) -> None:
+    cache = CoverTextureCache(budget_bytes=64 * 64 * 4)
+    cover = png_factory("accounting.png", width=64, height=64)
+    texture = cache.load_texture(cover, 64, 64)
+
+    assert texture is not None
+    assert cache.bytes_cached() == 64 * 64 * 4
+    assert cache.stats().bytes_cached == 64 * 64 * 4
+
+    cache.invalidate(cover)
+    assert cache.bytes_cached() == 0
+
+
+def test_replacing_an_entry_does_not_double_count_bytes(png_factory) -> None:
+    cache = CoverTextureCache()
+    cover = png_factory("replace-bytes.png", width=64, height=64)
+    cache.load_texture(cover, 64, 64)
+
+    _make_png(cover, 64, 64, 0xFF00FF00)
+    future = time.time() + 5
+    os.utime(cover, ns=(int(future * 1e9), int(future * 1e9)))
+    cache.load_texture(cover, 64, 64)
+
+    assert cache.size() == 1
+    assert cache.bytes_cached() == 64 * 64 * 4
+
+
+def test_prune_dead_drops_deleted_and_replaced_entries(png_factory) -> None:
+    cache = CoverTextureCache()
+    deleted = png_factory("deleted.png")
+    replaced = png_factory("replaced.png", width=64, height=64)
+    live = png_factory("live.png")
+
+    for cover in (deleted, replaced, live):
+        assert cache.load_texture(cover, 64, 64) is not None
+    assert cache.size() == 3
+
+    deleted.unlink()
+    _make_png(replaced, 64, 64, 0xFF00FF00)
+    future = time.time() + 5
+    os.utime(replaced, ns=(int(future * 1e9), int(future * 1e9)))
+
+    assert cache.prune_dead() == 2
+    assert cache.stats().prunes == 2
+    assert cache.size() == 1
+    # The live entry is still served from cache.
+    assert cache.load_texture(live, 64, 64) is not None
+    assert cache.stats().hits == 1
+
+
+def test_prune_dead_is_a_noop_when_everything_is_live(png_factory) -> None:
+    cache = CoverTextureCache()
+    cover = png_factory()
+    cache.load_texture(cover, 64, 64)
+
+    assert cache.prune_dead() == 0
+    assert cache.size() == 1
+    assert cache.stats().prunes == 0
+
+
+def test_large_library_stays_within_budget(png_factory) -> None:
+    """160 card-size covers must not pin more than the configured budget."""
+    cache = CoverTextureCache(budget_bytes=16 * 1024 * 1024)
+    covers = [png_factory(f"large-{index}.png", 184, 246) for index in range(160)]
+
+    for cover in covers:
+        cache.load_texture(cover, 368, 492)
+
+    stats = cache.stats()
+    assert cache.size() < len(covers)
+    assert stats.evictions == len(covers) - cache.size()
+    assert cache.bytes_cached() <= 16 * 1024 * 1024
+
+
+def test_evicted_texture_survives_while_a_widget_displays_it(png_factory) -> None:
+    """Eviction only drops the cache's reference, never the visible one."""
+    from gi.repository import Gtk
+
+    if Gdk.Display.get_default() is None:
+        pytest.skip("constructing GTK widgets needs a GDK display")
+
+    cache = CoverTextureCache(limit=1)
+    first = png_factory("visible-a.png", width=64, height=64)
+    second = png_factory("visible-b.png", width=64, height=64)
+
+    texture = cache.load_texture(first, 64, 64)
+    assert texture is not None
+    picture = Gtk.Picture.new_for_paintable(texture)
+    del texture
+
+    cache.load_texture(second, 64, 64)  # Evicts the first entry.
+    gc.collect()
+
+    # The widget still owns the texture, so eviction cannot blank the card.
+    retained = picture.get_paintable()
+    assert retained is not None
+    assert (retained.get_width(), retained.get_height()) == (64, 64)
+
+
+# ---------------------------------------------------------------------------
+# Oversized images are refused before decoding
+
+
+def _png_header(width: int, height: int) -> bytes:
+    """Return a PNG signature, IHDR, and empty IDAT with no pixel data."""
+    import struct
+    import zlib
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    header = b"IHDR" + ihdr
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", len(ihdr))
+        + header
+        + struct.pack(">I", zlib.crc32(header) & 0xFFFFFFFF)
+        + struct.pack(">I", 0)
+        + b"IDAT"
+        + struct.pack(">I", zlib.crc32(b"IDAT") & 0xFFFFFFFF)
+    )
+
+
+def test_oversized_cover_is_rejected_before_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    big = tmp_path / "big.png"
+    big.write_bytes(_png_header(7000, 7000))
+    cache = CoverTextureCache()
+
+    decoded: list[object] = []
+
+    def record_decode(*args, **kwargs):
+        decoded.append(args)
+        return None
+
+    monkeypatch.setattr(
+        GdkPixbuf.Pixbuf, "new_from_file_at_scale", staticmethod(record_decode)
+    )
+
+    assert cache.load_texture(big, 368, 492) is None
+    assert decoded == []
+    assert cache.size() == 0
+
+
+def test_oversized_preview_bytes_are_rejected_before_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import minimal_game_launcher.ui.cover as cover_module
+
+    class _ExplodingLoader:
+        def __init__(self) -> None:
+            raise AssertionError("oversized preview must not reach the loader")
+
+    monkeypatch.setattr(
+        cover_module.GdkPixbuf, "PixbufLoader", _ExplodingLoader
+    )
+
+    assert load_cover_texture_from_bytes(_png_header(7000, 7000)) is None

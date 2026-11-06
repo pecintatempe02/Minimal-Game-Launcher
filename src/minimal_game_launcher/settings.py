@@ -25,12 +25,22 @@ class WineSource(StrEnum):
     CUSTOM = "custom"
 
 
+class WinePrefixStrategy(StrEnum):
+    """How managed Wine prefixes are assigned to newly created games."""
+
+    PER_GAME = "per_game"
+    SHARED = "shared"
+
+
 @dataclass(frozen=True, slots=True)
 class LauncherSettings:
     """User-selected launch preferences."""
 
     wine_source: WineSource = WineSource.SYSTEM
     custom_wine_path: str | None = None
+    wine_prefix_strategy: WinePrefixStrategy = WinePrefixStrategy.PER_GAME
+    #: ``None`` means no explicit preference: startup must not touch desktop files.
+    desktop_entry_enabled: bool | None = None
 
 
 class SettingsStore:
@@ -77,9 +87,27 @@ class SettingsStore:
             if isinstance(raw_custom, str) and raw_custom.strip()
             else None
         )
+        raw_strategy = payload.get(
+            "wine_prefix_strategy", WinePrefixStrategy.PER_GAME.value
+        )
+        try:
+            wine_prefix_strategy = WinePrefixStrategy(raw_strategy)
+        except (TypeError, ValueError):
+            LOGGER.warning("Ignoring unknown Wine prefix strategy: %r", raw_strategy)
+            wine_prefix_strategy = WinePrefixStrategy.PER_GAME
+        raw_desktop = payload.get("desktop_entry_enabled")
+        desktop_entry_enabled = (
+            raw_desktop if isinstance(raw_desktop, bool) else None
+        )
+        if raw_desktop is not None and desktop_entry_enabled is None:
+            LOGGER.warning(
+                "Ignoring invalid desktop entry preference: %r", raw_desktop
+            )
         return LauncherSettings(
             wine_source=wine_source,
             custom_wine_path=custom_wine_path,
+            wine_prefix_strategy=wine_prefix_strategy,
+            desktop_entry_enabled=desktop_entry_enabled,
         )
 
     def save(self, settings: LauncherSettings) -> None:
@@ -87,6 +115,8 @@ class SettingsStore:
         payload = {
             "wine_source": settings.wine_source.value,
             "custom_wine_path": settings.custom_wine_path,
+            "wine_prefix_strategy": settings.wine_prefix_strategy.value,
+            "desktop_entry_enabled": settings.desktop_entry_enabled,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f"{self.path.name}.tmp")

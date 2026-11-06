@@ -7,6 +7,7 @@ main loop.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -64,6 +65,7 @@ class FakeRunner:
         prefix.mkdir(parents=True, exist_ok=True)
         if self.create_prefix:
             (prefix / "system.reg").write_text("fake registry\n", encoding="utf-8")
+            (prefix / "drive_c").mkdir(exist_ok=True)
         return subprocess.CompletedProcess(
             command,
             self.returncode,
@@ -207,6 +209,61 @@ def test_prefix_creation_uses_wineboot_and_lazy_directory(
     assert spec.command[1] == game.executable
 
 
+def test_failed_wineboot_leaves_prefix_unready_and_retries(
+    manager: GameManager, tmp_path: Path, fake_wine: Path
+) -> None:
+    """A wineboot that wrote system.reg then failed is never marked ready."""
+    game = _windows_game(manager, tmp_path)
+    failing = FakeRunner(returncode=1)
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        _custom_wine_store(tmp_path, fake_wine),
+        run_factory=failing,
+        which=_no_optional_tools,
+    )
+    with pytest.raises(PrefixInitializationError):
+        launcher.prepare_launch(game)
+    prefix = Path(game.wine_prefix_path or "")
+    assert (prefix / "system.reg").is_file()
+    assert not (prefix / PREFIX_READY_MARKER).exists()
+    assert not prefix_is_initialized(prefix)
+
+    # The next launch runs wineboot again instead of trusting the partial prefix.
+    retry = FakeRunner()
+    LaunchManager(
+        tmp_path / "prefixes",
+        _custom_wine_store(tmp_path, fake_wine),
+        run_factory=retry,
+        which=_no_optional_tools,
+    ).prepare_launch(game)
+    assert len(retry.calls) == 1
+    assert prefix_is_initialized(prefix)
+
+
+def test_legacy_prefix_without_marker_gets_one_wineboot_and_is_kept(
+    manager: GameManager, tmp_path: Path, fake_wine: Path
+) -> None:
+    """Earlier-MGL prefixes with system.reg are re-initialized, never deleted."""
+    game = _windows_game(manager, tmp_path)
+    prefix = Path(game.wine_prefix_path or "")
+    prefix.mkdir(parents=True)
+    (prefix / "system.reg").write_text("legacy\n", encoding="utf-8")
+    (prefix / "drive_c").mkdir()
+    (prefix / "user.dat").write_text("keep me\n", encoding="utf-8")
+
+    runner = FakeRunner()
+    LaunchManager(
+        tmp_path / "prefixes",
+        _custom_wine_store(tmp_path, fake_wine),
+        run_factory=runner,
+        which=_no_optional_tools,
+    ).prepare_launch(game)
+
+    assert len(runner.calls) == 1
+    assert (prefix / "user.dat").read_text(encoding="utf-8") == "keep me\n"
+    assert prefix_is_initialized(prefix)
+
+
 def test_prefix_reuse_skips_wineboot(
     manager: GameManager, tmp_path: Path, fake_wine: Path
 ) -> None:
@@ -294,6 +351,153 @@ def test_native_game_runs_without_wine_or_prefix(
     assert spec.prefix_path is None
     assert "WINEPREFIX" not in spec.env
     assert not (tmp_path / "prefixes").exists()
+
+
+def test_bare_command_is_resolved_through_path_and_keeps_argument_boundaries(
+    manager: GameManager, make_executable, tmp_path: Path
+) -> None:
+    """A bare command resolves safely and arguments stay separate argv items."""
+    command_path = make_executable("flatpak")
+    game = manager.add_game(
+        GameDraft(
+            name="Sober",
+            platform=Platform.LINUX,
+            executable=str(command_path),
+            launch_arguments='run org.vinegarhq.Sober "save games" --flag=$HOME',
+        )
+    )
+    game = replace(game, executable="flatpak", working_directory="")
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        SettingsStore(tmp_path / "settings.json"),
+        which=lambda name: str(command_path) if name == "flatpak" else None,
+    )
+
+    spec = launcher.prepare_launch(game)
+
+    assert spec.command == (
+        str(command_path.resolve()),
+        "run",
+        "org.vinegarhq.Sober",
+        "save games",
+        "--flag=$HOME",
+    )
+    assert spec.cwd == str(Path.home())
+    assert spec.env["PATH"] == os.environ["PATH"]
+
+
+def test_unresolvable_command_reports_a_useful_error(
+    manager: GameManager, make_executable, tmp_path: Path
+) -> None:
+    """A missing PATH command fails before any process is spawned."""
+    game = manager.add_game(
+        GameDraft(
+            name="Missing Command",
+            platform=Platform.LINUX,
+            executable=str(make_executable("placeholder")),
+        )
+    )
+    game = replace(game, executable="definitely-not-installed")
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        SettingsStore(tmp_path / "settings.json"),
+        which=lambda _name: None,
+    )
+
+    with pytest.raises(LaunchError, match="not found in PATH"):
+        launcher.prepare_launch(game)
+
+
+def test_environment_merges_with_inherited_values_and_empty_keeps_defaults(
+    manager: GameManager,
+    make_executable,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured variables extend the inherited environment."""
+    monkeypatch.setenv("MGL_INHERITED", "base")
+    monkeypatch.setenv("MGL_OVERRIDDEN", "inherited")
+    executable = make_executable("environment-game")
+    launcher = LaunchManager(
+        tmp_path / "prefixes", SettingsStore(tmp_path / "settings.json")
+    )
+
+    configured = manager.add_game(
+        GameDraft(
+            name="Configured",
+            platform=Platform.LINUX,
+            executable=str(executable),
+            environment="MGL_OVERRIDDEN=game\nMGL_ONLY=value\nMGL_EMPTY=",
+        )
+    )
+    spec = launcher.prepare_launch(configured)
+    assert spec.env["MGL_INHERITED"] == "base"
+    assert spec.env["MGL_OVERRIDDEN"] == "game"
+    assert spec.env["MGL_ONLY"] == "value"
+    assert spec.env["MGL_EMPTY"] == ""
+
+    empty = manager.add_game(
+        GameDraft(
+            name="Empty",
+            platform=Platform.LINUX,
+            executable=str(executable),
+        )
+    )
+    default_spec = launcher.prepare_launch(empty)
+    assert default_spec.env["MGL_INHERITED"] == "base"
+    assert default_spec.env["MGL_OVERRIDDEN"] == "inherited"
+    assert "MGL_ONLY" not in default_spec.env
+
+
+def test_reserved_environment_keys_never_override_launcher_values(
+    manager: GameManager, tmp_path: Path, fake_wine: Path
+) -> None:
+    """Defensive merging drops reserved keys even for legacy stored values."""
+    game = _windows_game(manager, tmp_path)
+    game = replace(
+        game,
+        environment={"WINEPREFIX": "/tmp/attacker", "MANGOHUD": "1"},
+        mangohud_enabled=False,
+    )
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        _custom_wine_store(tmp_path, fake_wine),
+        run_factory=FakeRunner(),
+        which=_no_optional_tools,
+    )
+
+    spec = launcher.prepare_launch(game)
+
+    assert spec.env["WINEPREFIX"] == game.wine_prefix_path
+    assert "MANGOHUD" not in spec.env
+
+
+def test_command_working_directory_can_be_configured(
+    manager: GameManager, make_executable, tmp_path: Path
+) -> None:
+    """An explicit working directory is validated and applied to commands."""
+    command_path = make_executable("gamemoderun")
+    working_directory = tmp_path / "Game Data"
+    working_directory.mkdir()
+    game = manager.add_game(
+        GameDraft(
+            name="Command Workdir",
+            platform=Platform.LINUX,
+            executable=str(command_path),
+            working_directory=str(working_directory),
+        )
+    )
+    game = replace(game, executable="gamemoderun")
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        SettingsStore(tmp_path / "settings.json"),
+        which=lambda name: str(command_path) if name == "gamemoderun" else None,
+    )
+
+    spec = launcher.prepare_launch(game)
+
+    assert spec.command[0] == str(command_path.resolve())
+    assert spec.cwd == str(working_directory.resolve())
 
 
 def test_wine_game_command_sets_wineprefix(
@@ -546,6 +750,7 @@ def test_process_status_updates_from_start_to_finish(
             platform=Platform.LINUX,
             executable=str(executable),
             launch_arguments="--one",
+            environment="MGL_SPAWN_TEST=passed",
         )
     )
     process = FakeProcess(polls_before_exit=1, returncode=0)
@@ -581,6 +786,7 @@ def test_process_status_updates_from_start_to_finish(
     assert kwargs["cwd"] == str(executable.parent.resolve())
     assert kwargs["stdout"] == subprocess.DEVNULL
     assert kwargs["stderr"] == subprocess.DEVNULL
+    assert kwargs["env"]["MGL_SPAWN_TEST"] == "passed"  # type: ignore[index]
     assert "WINEPREFIX" not in kwargs["env"]  # type: ignore[operator]
 
 

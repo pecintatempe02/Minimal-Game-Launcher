@@ -31,6 +31,7 @@ from minimal_game_launcher.services.performance_manager import (  # noqa: E402
     PerformanceManager,
 )
 from minimal_game_launcher.ui.cover import DEFAULT_CACHE, load_cover_texture  # noqa: E402
+from minimal_game_launcher.ui.lifecycle import DialogSignalOwner  # noqa: E402
 
 _IMAGE_PATTERNS = (
     "*.png",
@@ -44,7 +45,7 @@ _IMAGE_PATTERNS = (
 )
 
 
-class GameEditorDialog(Adw.Dialog):
+class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
     """Collect and persist one game's metadata.
 
     ``game`` is ``None`` for creation. The dialog emits ``saved`` with the
@@ -88,6 +89,7 @@ class GameEditorDialog(Adw.Dialog):
         self.set_can_close(True)
         self.set_child(self._build_ui())
         self._refresh_all_rows()
+        self._init_dialog_lifecycle()
 
     def _build_ui(self) -> Gtk.Widget:
         header = Adw.HeaderBar()
@@ -97,12 +99,12 @@ class GameEditorDialog(Adw.Dialog):
 
         cancel = Gtk.Button(label="Cancel")
         cancel.add_css_class("flat")
-        cancel.connect("clicked", lambda _button: self.close())
+        self.connect_owned(cancel, "clicked", self._on_cancel_clicked)
         header.pack_start(cancel)
 
         save = Gtk.Button(label="Save" if self._game else "Add")
         save.add_css_class("suggested-action")
-        save.connect("clicked", self._on_save_clicked)
+        self.connect_owned(save, "clicked", self._on_save_clicked)
         header.pack_end(save)
 
         toolbar = Adw.ToolbarView()
@@ -126,44 +128,55 @@ class GameEditorDialog(Adw.Dialog):
         self._platform_row.set_selected(
             1 if self._platform is Platform.WINDOWS else 0
         )
-        self._platform_row.connect("notify::selected", self._on_platform_changed)
+        self.connect_owned(
+            self._platform_row, "notify::selected", self._on_platform_changed
+        )
         game_group.add(self._platform_row)
 
         launch_group = Adw.PreferencesGroup(
             title="Launch configuration",
             description=(
-                "Arguments are validated with shell-like quoting, but games are "
-                "never launched through a shell."
+                "Linux entries accept a command found in PATH (for example "
+                "flatpak) or an executable path. Arguments are validated with "
+                "shell-like quoting, but games are never launched through a "
+                "shell."
             ),
         )
         preferences.add(launch_group)
 
-        self._executable_row = Adw.ActionRow(title="Executable")
-        self._executable_row.set_subtitle_selectable(True)
-        self._executable_row.set_activatable(True)
-        self._executable_row.connect("activated", self._choose_executable)
+        self._executable_row = Adw.EntryRow(title="Executable or command")
+        self._executable_row.set_text(self._executable)
+        self.connect_owned(
+            self._executable_row, "changed", self._on_executable_changed
+        )
         choose_executable = Gtk.Button.new_from_icon_name("folder-open-symbolic")
         choose_executable.set_tooltip_text("Choose executable")
         choose_executable.set_valign(Gtk.Align.CENTER)
-        choose_executable.connect("clicked", self._choose_executable)
+        self.connect_owned(choose_executable, "clicked", self._choose_executable)
         self._executable_row.add_suffix(choose_executable)
         launch_group.add(self._executable_row)
 
         self._working_directory_row = Adw.ActionRow(title="Working directory")
         self._working_directory_row.set_subtitle_selectable(True)
         self._working_directory_row.set_activatable(True)
-        self._working_directory_row.connect(
-            "activated", self._choose_working_directory
+        self.connect_owned(
+            self._working_directory_row,
+            "activated",
+            self._choose_working_directory,
         )
         reset_directory = Gtk.Button.new_from_icon_name("edit-undo-symbolic")
         reset_directory.set_tooltip_text("Use executable folder")
         reset_directory.set_valign(Gtk.Align.CENTER)
-        reset_directory.connect("clicked", self._reset_working_directory)
+        self.connect_owned(
+            reset_directory, "clicked", self._reset_working_directory
+        )
         self._working_directory_row.add_suffix(reset_directory)
         choose_directory = Gtk.Button.new_from_icon_name("folder-open-symbolic")
         choose_directory.set_tooltip_text("Choose working directory")
         choose_directory.set_valign(Gtk.Align.CENTER)
-        choose_directory.connect("clicked", self._choose_working_directory)
+        self.connect_owned(
+            choose_directory, "clicked", self._choose_working_directory
+        )
         self._working_directory_row.add_suffix(choose_directory)
         launch_group.add(self._working_directory_row)
 
@@ -171,6 +184,34 @@ class GameEditorDialog(Adw.Dialog):
         if self._game:
             self._arguments_row.set_text(self._game.launch_arguments)
         launch_group.add(self._arguments_row)
+
+        environment_group = Adw.PreferencesGroup(
+            title="Environment variables",
+            description=(
+                "Optional. One KEY=VALUE per line. Values are never evaluated "
+                "by a shell or written to the log."
+            ),
+        )
+        preferences.add(environment_group)
+
+        self._environment_view = Gtk.TextView()
+        self._environment_view.set_monospace(True)
+        self._environment_view.set_wrap_mode(Gtk.WrapMode.NONE)
+        if self._game and self._game.environment:
+            self._environment_view.get_buffer().set_text(
+                "\n".join(
+                    f"{key}={value}"
+                    for key, value in self._game.environment.items()
+                )
+            )
+        environment_scroll = Gtk.ScrolledWindow()
+        environment_scroll.set_policy(
+            Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC
+        )
+        environment_scroll.set_min_content_height(110)
+        environment_scroll.set_child(self._environment_view)
+        environment_scroll.add_css_class("card")
+        environment_group.add(environment_scroll)
 
         performance_group = Adw.PreferencesGroup(
             title="Performance",
@@ -204,19 +245,22 @@ class GameEditorDialog(Adw.Dialog):
 
         self._cover_preview = Gtk.Picture()
         self._cover_preview.set_size_request(40, 52)
-        self._cover_preview.set_content_fit(Gtk.ContentFit.COVER)
+        self._cover_preview.set_can_shrink(True)
+        self._cover_preview.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self._cover_preview.set_hexpand(False)
+        self._cover_preview.set_vexpand(False)
         self._cover_row.add_suffix(self._cover_preview)
 
         clear_cover = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
         clear_cover.set_tooltip_text("Remove cover")
         clear_cover.set_valign(Gtk.Align.CENTER)
-        clear_cover.connect("clicked", self._clear_cover)
+        self.connect_owned(clear_cover, "clicked", self._clear_cover)
         self._cover_row.add_suffix(clear_cover)
 
         choose_cover = Gtk.Button.new_from_icon_name("folder-open-symbolic")
         choose_cover.set_tooltip_text("Choose cover image")
         choose_cover.set_valign(Gtk.Align.CENTER)
-        choose_cover.connect("clicked", self._choose_cover)
+        self.connect_owned(choose_cover, "clicked", self._choose_cover)
         self._cover_row.add_suffix(choose_cover)
         cover_group.add(self._cover_row)
 
@@ -230,27 +274,24 @@ class GameEditorDialog(Adw.Dialog):
         self._refresh_cover_row()
 
     def _update_platform_labels(self) -> None:
-        windows = self._platform is Platform.WINDOWS
         self._executable_row.set_title(
-            "Executable (.exe)" if windows else "Executable binary"
+            "Executable (.exe)"
+            if self._platform is Platform.WINDOWS
+            else "Executable or command"
         )
-        self._executable_row.set_subtitle(
-            "Select the Windows game executable"
-            if windows
-            else "Select the Linux game executable"
-        )
-        if self._executable:
-            self._refresh_executable_row()
+        self._refresh_executable_row()
 
     def _refresh_executable_row(self) -> None:
-        if self._executable:
-            self._executable_row.set_subtitle(self._executable)
-        else:
-            self._executable_row.set_subtitle(
-                "Select the Windows .exe file"
-                if self._platform is Platform.WINDOWS
-                else "Select the Linux executable"
-            )
+        if self._executable_row.get_text() != self._executable:
+            self._executable_row.set_text(self._executable)
+        self._executable_row.set_tooltip_text(
+            "Type a command available in PATH, or choose an executable file"
+            if self._platform is Platform.LINUX
+            else "Type or choose the Windows .exe file"
+        )
+
+    def _on_executable_changed(self, row: Adw.EntryRow) -> None:
+        self._executable = row.get_text()
 
     def _refresh_working_directory_row(self) -> None:
         if self._working_directory:
@@ -466,6 +507,17 @@ class GameEditorDialog(Adw.Dialog):
         self._cover_path = None
         self._refresh_cover_row()
 
+    def _on_cancel_clicked(self, _button: Gtk.Button) -> None:
+        self.close()
+
+    def _release_dialog_references(self) -> None:
+        """Drop widget and preview references once the dialog is closed."""
+        self._active_file_dialog = None
+        self._active_error = None
+        preview = getattr(self, "_cover_preview", None)
+        if preview is not None:
+            preview.set_paintable(None)
+
     def _on_save_clicked(self, _button: Gtk.Button) -> None:
         game_id = self._game.id if self._game else self._manager.new_game_id()
 
@@ -487,6 +539,7 @@ class GameEditorDialog(Adw.Dialog):
             executable=self._executable,
             working_directory=self._working_directory,
             launch_arguments=self._arguments_row.get_text(),
+            environment=self._environment_text(),
             cover_path=cover_path,
             gamemode_enabled=self._gamemode_row.get_active(),
             mangohud_enabled=self._mangohud_row.get_active(),
@@ -522,6 +575,13 @@ class GameEditorDialog(Adw.Dialog):
 
         self.emit("saved", saved)
         self.close()
+
+    def _environment_text(self) -> str:
+        """Return the raw multiline environment editor content."""
+        buffer = self._environment_view.get_buffer()
+        return buffer.get_text(
+            buffer.get_start_iter(), buffer.get_end_iter(), True
+        )
 
     def _show_error(self, message: str) -> None:
         """Present validation details without dismissing the form."""

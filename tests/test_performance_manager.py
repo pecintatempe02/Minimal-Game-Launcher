@@ -303,6 +303,7 @@ class FakeWineboot:
         prefix = Path(str(kwargs["env"]["WINEPREFIX"]))  # type: ignore[index]
         prefix.mkdir(parents=True, exist_ok=True)
         (prefix / "system.reg").write_text("fake registry\n", encoding="utf-8")
+        (prefix / "drive_c").mkdir(exist_ok=True)
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
 

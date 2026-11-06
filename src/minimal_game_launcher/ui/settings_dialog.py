@@ -17,6 +17,7 @@ The key is never written to the JSON settings file or source code.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -27,19 +28,30 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
 
+from minimal_game_launcher.errors import DesktopIntegrationError  # noqa: E402
+from minimal_game_launcher.services.desktop_integration import (  # noqa: E402
+    DesktopEntryState,
+    DesktopIntegrationService,
+)
 from minimal_game_launcher.settings import (  # noqa: E402
     LauncherSettings,
     SettingsStore,
+    WinePrefixStrategy,
     WineSource,
 )
 from minimal_game_launcher.themes import Appearance  # noqa: E402
+from minimal_game_launcher.ui.lifecycle import DialogSignalOwner  # noqa: E402
 from minimal_game_launcher.ui.theme import ThemeController  # noqa: E402
 
 _APPEARANCE_LABELS = ("System", "Dark", "Light")
 _APPEARANCE_MODES = (Appearance.SYSTEM, Appearance.DARK, Appearance.LIGHT)
+_PREFIX_STRATEGIES = (WinePrefixStrategy.PER_GAME, WinePrefixStrategy.SHARED)
+_PREFIX_STRATEGY_LABELS = ("One prefix per game", "One shared prefix")
+
+LOGGER = logging.getLogger(__name__)
 
 
-class SettingsDialog(Adw.Dialog):
+class SettingsDialog(Adw.Dialog, DialogSignalOwner):
     """Edit and save the Wine executable preference and the active theme.
 
     Theme and appearance apply and persist as soon as they are selected, so
@@ -57,14 +69,19 @@ class SettingsDialog(Adw.Dialog):
         parent_window: Gtk.Window,
         settings_store: SettingsStore,
         theme_controller: ThemeController,
+        *,
+        desktop_integration: DesktopIntegrationService | None = None,
     ) -> None:
         super().__init__()
         self._parent_window = parent_window
         self._settings_store = settings_store
         self._theme_controller = theme_controller
+        self._desktop_integration = desktop_integration
         current = settings_store.load()
         self._wine_source = current.wine_source
         self._custom_wine_path = current.custom_wine_path
+        self._prefix_strategy = current.wine_prefix_strategy
+        self._desktop_entry_enabled = current.desktop_entry_enabled
         self._theme_ids: list[str] = []
         self._appearance_index: int | None = None
         #: Set while the rows are being repopulated, so writing the selection
@@ -78,12 +95,13 @@ class SettingsDialog(Adw.Dialog):
         self.set_content_height(560)
         self.set_can_close(True)
         self.set_child(self._build_ui())
+        self._initial_desktop_active = self._desktop_row.get_active()
         self._refresh_custom_row()
         self._refresh_theme_rows()
         self._theme_handler = theme_controller.connect(
             "changed", self._on_theme_controller_changed
         )
-        self.connect("closed", self._on_closed)
+        self._init_dialog_lifecycle()
 
     def _build_ui(self) -> Gtk.Widget:
         header = Adw.HeaderBar()
@@ -92,12 +110,12 @@ class SettingsDialog(Adw.Dialog):
         # Theme and appearance are already saved by the time this is pressed.
         close = Gtk.Button(label="Close")
         close.add_css_class("flat")
-        close.connect("clicked", lambda _button: self.close())
+        self.connect_owned(close, "clicked", self._on_close_clicked)
         header.pack_start(close)
 
         save = Gtk.Button(label="Save")
         save.add_css_class("suggested-action")
-        save.connect("clicked", self._on_save_clicked)
+        self.connect_owned(save, "clicked", self._on_save_clicked)
         header.pack_end(save)
 
         toolbar = Adw.ToolbarView()
@@ -109,8 +127,8 @@ class SettingsDialog(Adw.Dialog):
         wine_group = Adw.PreferencesGroup(
             title="Wine",
             description=(
-                "Wine is used only for Windows games. Each game has its own "
-                "prefix, created on its first launch."
+                "Wine is used only for Windows games. By default each game has "
+                "its own prefix, created on its first launch."
             ),
         )
         page.add(wine_group)
@@ -122,18 +140,40 @@ class SettingsDialog(Adw.Dialog):
         self._source_row.set_selected(
             1 if self._wine_source is WineSource.CUSTOM else 0
         )
-        self._source_row.connect("notify::selected", self._on_source_changed)
+        self.connect_owned(
+            self._source_row, "notify::selected", self._on_source_changed
+        )
         wine_group.add(self._source_row)
+
+        self._strategy_row = Adw.ComboRow(
+            title="Wine prefix strategy",
+            subtitle=(
+                "Applies only to games and installs added from now on. Existing "
+                "games keep their current prefix."
+            ),
+        )
+        self._strategy_row.set_model(
+            Gtk.StringList.new(list(_PREFIX_STRATEGY_LABELS))
+        )
+        self._strategy_row.set_selected(
+            _PREFIX_STRATEGIES.index(self._prefix_strategy)
+        )
+        self.connect_owned(
+            self._strategy_row, "notify::selected", self._on_strategy_changed
+        )
+        wine_group.add(self._strategy_row)
 
         self._custom_row = Adw.ActionRow(title="Custom Wine executable")
         self._custom_row.set_subtitle_selectable(True)
         self._custom_row.set_activatable(True)
-        self._custom_row.connect("activated", self._choose_custom_wine)
+        self.connect_owned(
+            self._custom_row, "activated", self._choose_custom_wine
+        )
 
         choose = Gtk.Button.new_from_icon_name("folder-open-symbolic")
         choose.set_tooltip_text("Choose custom Wine executable")
         choose.set_valign(Gtk.Align.CENTER)
-        choose.connect("clicked", self._choose_custom_wine)
+        self.connect_owned(choose, "clicked", self._choose_custom_wine)
         self._custom_row.add_suffix(choose)
         wine_group.add(self._custom_row)
 
@@ -149,7 +189,9 @@ class SettingsDialog(Adw.Dialog):
 
         self._theme_row = Adw.ComboRow(title="Theme")
         self._theme_row.set_model(Gtk.StringList.new([]))
-        self._theme_row.connect("notify::selected", self._on_theme_changed)
+        self.connect_owned(
+            self._theme_row, "notify::selected", self._on_theme_changed
+        )
         appearance_group.add(self._theme_row)
 
         self._appearance_row = Adw.ComboRow(title="Appearance")
@@ -159,10 +201,37 @@ class SettingsDialog(Adw.Dialog):
         self._appearance_row.set_subtitle(
             "System follows the desktop setting when one is available"
         )
-        self._appearance_row.connect(
-            "notify::selected", self._on_appearance_changed
+        self.connect_owned(
+            self._appearance_row,
+            "notify::selected",
+            self._on_appearance_changed,
         )
         appearance_group.add(self._appearance_row)
+
+        launcher_group = Adw.PreferencesGroup(
+            title="Application launcher",
+            description=(
+                "A user-level desktop entry makes Minimal Game Launcher appear "
+                "in your application menu. It is written under "
+                "$XDG_DATA_HOME/applications. Fuzzel and Hyprland configuration "
+                "is not modified."
+            ),
+        )
+        page.add(launcher_group)
+
+        self._desktop_row = Adw.SwitchRow(
+            title="Show Minimal Game Launcher in the application launcher",
+            subtitle=(
+                "Creates or removes only MGL's own user-level desktop entry; "
+                "Fuzzel and Hyprland configuration is not changed"
+            ),
+        )
+        self._desktop_row.set_active(
+            self._desktop_integration.is_enabled()
+            if self._desktop_integration is not None
+            else self._desktop_entry_enabled is True
+        )
+        launcher_group.add(self._desktop_row)
 
         cover_group = Adw.PreferencesGroup(
             title="Online cover search",
@@ -230,11 +299,16 @@ class SettingsDialog(Adw.Dialog):
         """Follow a theme change made outside this dialog."""
         self._refresh_theme_rows()
 
-    def _on_closed(self, _dialog: Adw.Dialog) -> None:
-        """Stop listening to the controller once the dialog is gone."""
+    def _on_close_clicked(self, _button: Gtk.Button) -> None:
+        self.close()
+
+    def _release_dialog_references(self) -> None:
+        """Stop listening to the controller and drop transient references."""
         if self._theme_handler is not None:
             self._theme_controller.disconnect(self._theme_handler)
             self._theme_handler = None
+        self._active_file_dialog = None
+        self._active_error = None
 
     def _refresh_custom_row(self) -> None:
         custom = self._wine_source is WineSource.CUSTOM
@@ -242,6 +316,11 @@ class SettingsDialog(Adw.Dialog):
         self._custom_row.set_subtitle(
             self._custom_wine_path or "No custom executable selected"
         )
+
+    def _on_strategy_changed(self, _row: Adw.ComboRow, _pspec: object) -> None:
+        index = self._strategy_row.get_selected()
+        if 0 <= index < len(_PREFIX_STRATEGIES):
+            self._prefix_strategy = _PREFIX_STRATEGIES[index]
 
     def _on_source_changed(self, _row: Adw.ComboRow, _pspec: object) -> None:
         self._wine_source = (
@@ -356,19 +435,57 @@ class SettingsDialog(Adw.Dialog):
         else:
             custom_path = self._custom_wine_path
 
+        desired = self._desktop_row.get_active()
+        # Keep ``None`` when the user did not change the visible state, so an
+        # unrelated save never starts managing desktop files.
+        if desired != self._initial_desktop_active:
+            self._desktop_entry_enabled = desired
+        previous_state: DesktopEntryState | None = None
+        if (
+            self._desktop_integration is not None
+            and self._desktop_entry_enabled is not None
+        ):
+            previous_state = self._desktop_integration.state()
+            try:
+                self._desktop_integration.apply(self._desktop_entry_enabled)
+            except DesktopIntegrationError as error:
+                self._show_error(
+                    "The desktop entry could not be updated: "
+                    f"{error}\n\nCheck that $XDG_DATA_HOME/applications is "
+                    "writable, then try again."
+                )
+                return
+
         settings = LauncherSettings(
             wine_source=self._wine_source,
             custom_wine_path=custom_path,
+            wine_prefix_strategy=self._prefix_strategy,
+            desktop_entry_enabled=self._desktop_entry_enabled,
         )
         try:
             self._settings_store.save_api_key(self._api_key_row.get_text())
             self._settings_store.save(settings)
         except OSError as error:
+            self._restore_desktop_state(previous_state)
             self._show_error(f"Settings could not be saved: {error}")
             return
 
         self.emit("saved", settings)
         self.close()
+
+    def _restore_desktop_state(self, state: DesktopEntryState | None) -> None:
+        """Undo a desktop-entry change after settings persistence failed."""
+        if state is None or self._desktop_integration is None:
+            return
+        try:
+            if state is DesktopEntryState.ENABLED:
+                self._desktop_integration.enable()
+            elif state is DesktopEntryState.DISABLED:
+                self._desktop_integration.disable()
+            else:
+                self._desktop_integration.remove_owned_entry()
+        except DesktopIntegrationError:
+            LOGGER.exception("Could not restore the previous desktop entry state")
 
     def _show_error(self, message: str) -> None:
         """Show a short validation message without a Python traceback."""

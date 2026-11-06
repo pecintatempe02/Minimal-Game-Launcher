@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import minimal_game_launcher.services.game_manager as game_manager_module
-from minimal_game_launcher.database import Database
+from minimal_game_launcher.database import Database, SCHEMA_VERSION
 from minimal_game_launcher.errors import GameValidationError
 from minimal_game_launcher.models import GameDraft, Platform
 from minimal_game_launcher.services.game_manager import (
@@ -311,7 +312,255 @@ def test_database_migrates_phase3_rows_with_defaults(tmp_path: Path) -> None:
         assert game is not None
         assert game.gamemode_enabled is True
         assert game.mangohud_enabled is False
+        assert game.environment == {}
+        # Step 3 metadata defaults to conservative, non-owned values.
+        assert game.install_directory is None
+        assert game.install_directory_owned is False
+        assert game.installer_source_directory is None
+        assert game.installer_source_owned is False
+        assert game.wine_prefix_path == "/prefixes/legacy-id"
         version = database._connection.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 2
+        assert version == SCHEMA_VERSION
     finally:
         database.close()
+
+
+def test_database_migrates_v2_rows_and_keeps_environment_empty(
+    tmp_path: Path,
+) -> None:
+    """A Phase 4 database gains the environment column without losing a row."""
+    path = tmp_path / "phase4.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE games (
+            id                TEXT PRIMARY KEY NOT NULL,
+            name              TEXT NOT NULL,
+            platform          TEXT NOT NULL,
+            executable        TEXT NOT NULL,
+            working_directory TEXT NOT NULL,
+            launch_arguments  TEXT NOT NULL DEFAULT '',
+            cover_path        TEXT,
+            wine_prefix_path  TEXT,
+            gamemode_enabled  INTEGER NOT NULL DEFAULT 1,
+            mangohud_enabled  INTEGER NOT NULL DEFAULT 0,
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL
+        );
+        PRAGMA user_version = 2;
+        INSERT INTO games (
+            id, name, platform, executable, working_directory,
+            launch_arguments, cover_path, wine_prefix_path,
+            gamemode_enabled, mangohud_enabled, created_at, updated_at
+        ) VALUES (
+            'phase4-id', 'Phase 4 Game', 'linux', '/games/phase4',
+            '/games', '--fullscreen', NULL, NULL,
+            0, 1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(path)
+    try:
+        game = database.get_game("phase4-id")
+        assert game is not None
+        assert game.name == "Phase 4 Game"
+        assert game.gamemode_enabled is False
+        assert game.mangohud_enabled is True
+        assert game.launch_arguments == "--fullscreen"
+        assert game.environment == {}
+        assert game.install_directory is None
+        assert game.install_directory_owned is False
+        version = database._connection.execute("PRAGMA user_version").fetchone()[0]
+        assert version == SCHEMA_VERSION
+        # Reopening must be repeatable and must not alter the row.
+        database.close()
+        database = Database(path)
+        assert database.get_game("phase4-id") == game
+    finally:
+        database.close()
+
+
+def test_database_migrates_v3_rows_and_preserves_environment_and_prefix(
+    tmp_path: Path,
+) -> None:
+    """Step 2 data keeps its environment and prefix and gains safe defaults."""
+    path = tmp_path / "step2.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE games (
+            id                TEXT PRIMARY KEY NOT NULL,
+            name              TEXT NOT NULL,
+            platform          TEXT NOT NULL,
+            executable        TEXT NOT NULL,
+            working_directory TEXT NOT NULL,
+            launch_arguments  TEXT NOT NULL DEFAULT '',
+            cover_path        TEXT,
+            wine_prefix_path  TEXT,
+            gamemode_enabled  INTEGER NOT NULL DEFAULT 1,
+            mangohud_enabled  INTEGER NOT NULL DEFAULT 0,
+            environment       TEXT NOT NULL DEFAULT '{}',
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL
+        );
+        PRAGMA user_version = 3;
+        INSERT INTO games (
+            id, name, platform, executable, working_directory,
+            launch_arguments, cover_path, wine_prefix_path,
+            gamemode_enabled, mangohud_enabled, environment,
+            created_at, updated_at
+        ) VALUES (
+            'step2-id', 'Step 2 Game', 'windows', '/games/step2.exe',
+            '/games', '--safe', NULL, '/data/prefixes/step2-id',
+            1, 0, '{"LANG": "C"}',
+            '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(path)
+    try:
+        game = database.get_game("step2-id")
+        assert game is not None
+        assert game.environment == {"LANG": "C"}
+        assert game.wine_prefix_path == "/data/prefixes/step2-id"
+        assert game.install_directory is None
+        assert game.install_directory_owned is False
+        assert game.installer_source_directory is None
+        assert game.installer_source_owned is False
+        version = database._connection.execute("PRAGMA user_version").fetchone()[0]
+        assert version == SCHEMA_VERSION
+
+        database.close()
+        database = Database(path)
+        assert database.get_game("step2-id") == game
+    finally:
+        database.close()
+
+
+def test_editing_a_game_preserves_ownership_metadata(
+    manager: GameManager, make_executable
+) -> None:
+    """The editor does not own these fields, so an edit must not clear them."""
+    executable = make_executable("owned-game.exe")
+    game = manager.add_game(_windows_draft("Owned", executable))
+    owned = replace(
+        game,
+        install_directory=f"/data/games/{game.id}",
+        install_directory_owned=True,
+        installer_source_directory=f"/data/installers/{game.id}",
+        installer_source_owned=True,
+    )
+    assert manager._database.update_game(owned)
+    prefix_before = owned.wine_prefix_path
+
+    updated = manager.update_game(
+        game.id, _windows_draft("Renamed", executable)
+    )
+
+    assert updated.name == "Renamed"
+    assert updated.install_directory == f"/data/games/{game.id}"
+    assert updated.install_directory_owned is True
+    assert updated.installer_source_directory == f"/data/installers/{game.id}"
+    assert updated.installer_source_owned is True
+    assert updated.wine_prefix_path == prefix_before
+    assert manager.get_game(game.id) == updated
+
+
+def test_environment_variables_persist_and_edit(
+    manager: GameManager, make_executable
+) -> None:
+    """Environment lines are parsed, persisted, and restored on edit."""
+    executable = make_executable("environment-game")
+    game = manager.add_game(
+        _linux_draft(
+            "Environment",
+            executable,
+            environment="A=1\nEMPTY=\nSAFE=two words",
+        )
+    )
+
+    assert game.environment == {"A": "1", "EMPTY": "", "SAFE": "two words"}
+    assert manager.get_game(game.id).environment == game.environment
+
+    updated = manager.update_game(
+        game.id,
+        _linux_draft(
+            "Environment",
+            executable,
+            environment="ONLY=updated",
+        ),
+    )
+    assert updated.environment == {"ONLY": "updated"}
+    assert manager.get_game(game.id).environment == {"ONLY": "updated"}
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("NO_EQUALS", "KEY=VALUE"),
+        ("=value", "invalid variable name"),
+        ("1BAD=value", "invalid variable name"),
+        ("BAD-NAME=value", "invalid variable name"),
+        ("WINEPREFIX=/tmp/elsewhere", "managed by the launcher"),
+        ("MANGOHUD=1", "managed by the launcher"),
+        ("A=1\nA=2", "defined more than once"),
+        ("A=bad\x00value", "NUL"),
+    ],
+)
+def test_environment_validation_rejects_invalid_input(
+    manager: GameManager,
+    make_executable,
+    text: str,
+    message: str,
+) -> None:
+    """Malformed or reserved variables never reach the database."""
+    with pytest.raises(GameValidationError, match=message):
+        manager.add_game(
+            _linux_draft(
+                "Invalid Environment",
+                make_executable("invalid-environment"),
+                environment=text,
+            )
+        )
+    assert manager.list_games() == []
+
+
+def test_bare_command_is_validated_but_not_rewritten(
+    manager: GameManager,
+    make_executable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PATH command is accepted and the saved value stays as typed."""
+    located = make_executable("fake-command")
+    monkeypatch.setattr(
+        manager,
+        "_which",
+        lambda name: str(located) if name == "fake-command" else None,
+    )
+
+    game = manager.add_game(
+        _linux_draft("Command", "fake-command", launch_arguments="run app")
+    )
+
+    assert game.executable == "fake-command"
+    assert game.working_directory == ""
+    assert manager.get_game(game.id).executable == "fake-command"
+
+
+def test_unresolvable_command_is_rejected(
+    manager: GameManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command missing from PATH produces a useful validation error."""
+    monkeypatch.setattr(manager, "_which", lambda _name: None)
+
+    with pytest.raises(GameValidationError, match="not found in PATH"):
+        manager.add_game(
+            _linux_draft("Missing Command", "definitely-not-installed")
+        )
+    assert manager.list_games() == []

@@ -21,7 +21,16 @@ gi.require_version("Adw", "1")
 import pytest  # noqa: E402
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
-from minimal_game_launcher.settings import SettingsStore  # noqa: E402
+from minimal_game_launcher.errors import DesktopIntegrationError  # noqa: E402
+from minimal_game_launcher.services.desktop_integration import (  # noqa: E402
+    DesktopEntryState,
+    DesktopIntegrationService,
+)
+from minimal_game_launcher.settings import (  # noqa: E402
+    LauncherSettings,
+    SettingsStore,
+    WinePrefixStrategy,
+)
 from minimal_game_launcher.themes import (  # noqa: E402
     Appearance,
     ThemePalette,
@@ -169,6 +178,12 @@ def test_css_maps_every_semantic_color() -> None:
     assert "@define-color card_bg_color #1c1920;" in css
     assert "@define-color popover_bg_color #26222b;" in css
     assert "@define-color window_fg_color #f3eef2;" in css
+    assert "@define-color view_fg_color #f3eef2;" in css
+    assert "@define-color headerbar_fg_color #f3eef2;" in css
+    assert "@define-color popover_fg_color #f3eef2;" in css
+    assert "@define-color dialog_fg_color #f3eef2;" in css
+    assert "@define-color card_fg_color #f3eef2;" in css
+    assert "@define-color dimmed_fg_color #a9a1ac;" in css
     assert "@define-color borders #3a333e;" in css
     assert "@define-color success_color #4caf6d;" in css
     assert "@define-color warning_color #d9a441;" in css
@@ -417,6 +432,131 @@ def test_settings_dialog_lists_themes_and_applies_choices(
         dialog._appearance_row.set_selected(2)  # light
         assert instance.config.appearance is Appearance.LIGHT
         assert "appearance = light" in theme_file.read_text(encoding="utf-8")
+    finally:
+        instance.shutdown()
+
+
+def test_settings_dialog_saves_wine_prefix_strategy(
+    tmp_path: Path, gtk_registry
+) -> None:
+    store = SettingsStore(tmp_path / "settings.json")
+    store.save(LauncherSettings(wine_prefix_strategy=WinePrefixStrategy.PER_GAME))
+    instance = ThemeController(
+        tmp_path / "themes.ini",
+        debounce_ms=30,
+        display=object(),
+        style_manager=_FakeStyleManager(),
+    )
+    instance.start()
+    try:
+        dialog = SettingsDialog(None, store, instance)
+        assert dialog._strategy_row.get_selected() == 0  # per game
+
+        dialog._strategy_row.set_selected(1)  # one shared prefix
+        dialog._on_save_clicked(None)
+
+        assert store.load().wine_prefix_strategy is WinePrefixStrategy.SHARED
+    finally:
+        instance.shutdown()
+
+
+def _desktop_service(tmp_path: Path) -> DesktopIntegrationService:
+    applications = tmp_path / "data" / "applications"
+    return DesktopIntegrationService(
+        entry_path=applications / "io.github.minimal_game_launcher.MinimalGameLauncher.desktop",
+        icon_path=tmp_path / "data" / "icons" / "mgl.svg",
+        application_directory=applications,
+        system_directories=(),
+        launch_command=["/opt/mgl/minimal-game-launcher"],
+    )
+
+
+def test_settings_dialog_enables_the_desktop_entry(
+    tmp_path: Path, gtk_registry
+) -> None:
+    store = SettingsStore(tmp_path / "settings.json")
+    service = _desktop_service(tmp_path)
+    instance = ThemeController(
+        tmp_path / "themes.ini",
+        debounce_ms=30,
+        display=object(),
+        style_manager=_FakeStyleManager(),
+    )
+    instance.start()
+    try:
+        dialog = SettingsDialog(
+            None, store, instance, desktop_integration=service
+        )
+        assert dialog._desktop_row.get_active() is False
+
+        dialog._desktop_row.set_active(True)
+        dialog._on_save_clicked(None)
+
+        assert service.state() is DesktopEntryState.ENABLED
+        assert store.load().desktop_entry_enabled is True
+    finally:
+        instance.shutdown()
+
+
+def test_settings_dialog_rolls_back_desktop_entry_on_save_failure(
+    tmp_path: Path, gtk_registry, monkeypatch
+) -> None:
+    store = SettingsStore(tmp_path / "settings.json")
+    service = _desktop_service(tmp_path)
+    instance = ThemeController(
+        tmp_path / "themes.ini",
+        debounce_ms=30,
+        display=object(),
+        style_manager=_FakeStyleManager(),
+    )
+    instance.start()
+    try:
+        dialog = SettingsDialog(
+            None, store, instance, desktop_integration=service
+        )
+        messages: list[str] = []
+        monkeypatch.setattr(dialog, "_show_error", messages.append)
+        monkeypatch.setattr(
+            store, "save", lambda _settings: (_ for _ in ()).throw(OSError("disk"))
+        )
+
+        dialog._desktop_row.set_active(True)
+        dialog._on_save_clicked(None)
+
+        assert service.state() is DesktopEntryState.ABSENT
+        assert messages and "could not be saved" in messages[0]
+    finally:
+        instance.shutdown()
+
+
+def test_settings_dialog_keeps_open_when_integration_fails(
+    tmp_path: Path, gtk_registry, monkeypatch
+) -> None:
+    store = SettingsStore(tmp_path / "settings.json")
+    service = _desktop_service(tmp_path)
+    instance = ThemeController(
+        tmp_path / "themes.ini",
+        debounce_ms=30,
+        display=object(),
+        style_manager=_FakeStyleManager(),
+    )
+    instance.start()
+    try:
+        dialog = SettingsDialog(
+            None, store, instance, desktop_integration=service
+        )
+        messages: list[str] = []
+        monkeypatch.setattr(dialog, "_show_error", messages.append)
+
+        def fail():
+            raise DesktopIntegrationError("read-only")
+
+        monkeypatch.setattr(service, "apply", lambda _enabled: fail())
+        dialog._desktop_row.set_active(True)
+        dialog._on_save_clicked(None)
+
+        assert messages and "could not be updated" in messages[0]
+        assert store.load().desktop_entry_enabled is None
     finally:
         instance.shutdown()
 

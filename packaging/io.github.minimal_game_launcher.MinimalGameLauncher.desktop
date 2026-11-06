@@ -10,3 +10,4 @@ Categories=Game;Utility;
 Keywords=games;library;wine;launcher;
 StartupNotify=true
 StartupWMClass=io.github.minimal_game_launcher.MinimalGameLauncher
+X-MGL-Managed=true

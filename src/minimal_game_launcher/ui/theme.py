@@ -52,7 +52,18 @@ _BASE_TARGETS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("background", ("window_bg_color", "view_bg_color", "headerbar_bg_color")),
     ("surface", ("card_bg_color",)),
     ("surface_elevated", ("popover_bg_color", "dialog_bg_color")),
-    ("text", ("window_fg_color", "view_fg_color")),
+    (
+        "text",
+        (
+            "window_fg_color",
+            "view_fg_color",
+            "headerbar_fg_color",
+            "popover_fg_color",
+            "dialog_fg_color",
+            "card_fg_color",
+        ),
+    ),
+    ("text_muted", ("dimmed_fg_color",)),
     ("border", ("borders",)),
 )
 

@@ -35,6 +35,30 @@ class ProcessLaunchError(LaunchError):
     """Raised when the operating system refuses to create a process."""
 
 
+class OwnershipError(LauncherError):
+    """Raised when a resource's ownership or a deletion request is refused."""
+
+
+class SharedPrefixUnavailableError(LauncherError):
+    """Raised when the shared prefix was removed while an assignment waited."""
+
+
+class InstallerError(LauncherError):
+    """Base class for expected ISO-installer failures."""
+
+
+class IsoMountError(InstallerError):
+    """Raised when an ISO cannot be mounted or safely unmounted."""
+
+
+class InstallerStagingError(InstallerError):
+    """Raised when ISO contents cannot be staged or verified."""
+
+
+class DesktopIntegrationError(LauncherError):
+    """Raised when a user-level desktop entry cannot be written or removed."""
+
+
 class CoverError(LauncherError):
     """Base class for expected cover-management errors."""
 
