@@ -27,17 +27,34 @@ To create a fully self-contained `.AppImage`, provide:
 # The AppDir is created at:
 # build/appdir/
 
-# The final packaging step produces:
-# dist/Minimal-Game-Launcher.AppImage
+# The final packaging step produces a versioned artifact:
+# dist/Minimal-Game-Launcher-0.5.0-x86_64.AppImage
+# dist/Minimal-Game-Launcher-0.5.0-x86_64.AppImage.sha256
 ```
+
+The artifact name is generated from `APP_VERSION` in
+`src/minimal_game_launcher/__init__.py`. `scripts/package-appimage.sh` writes
+the SHA-256 checksum beside the AppImage so both can be attached to the same
+GitHub Release. `build.sh` resolves the repository root and cleans only
+`$ROOT/build`, so it is safe to invoke from any working directory.
+
+## Release assets and tracking
+
+Release binaries are distributed as GitHub Release assets, not tracked source
+files. `dist/` and `*.AppImage` are ignored. The local
+`dist/Minimal-Game-Launcher.AppImage` is preserved on disk but is no longer
+tracked by Git; the release process produces the versioned name above.
+
+The desktop entry carries `X-AppImage-Version=0.5.0`, the AppImage metadata
+convention for the application version. `Version=1.5` remains the Desktop Entry
+specification version and is unrelated to the application version.
 
 ## Blocker status
 
-As of Step 6 (2026-11-05), `appimagetool`, `mksquashfs`, and an AppImage runtime
-are available on the build host. `./build.sh` produces both `build/appdir/` and
-`dist/Minimal-Game-Launcher.AppImage` (about 1.1 MB with the host GTK runtime).
-The output is verified only on this host; cross-distribution portability is not
-claimed.
+As of v0.5.0 release preparation (2026-11-06), `appimagetool`, `mksquashfs`, and
+an AppImage runtime are available on the build host. `./build.sh` produces both
+`build/appdir/` and the versioned AppImage. The output is verified only on this
+host; cross-distribution portability is not claimed.
 
 ## Relocatable desktop entry
 
@@ -97,7 +114,7 @@ Steps 1–7 below were executed in Step 6 against the rebuilt AppDir/AppImage:
 4. Test with isolated `HOME` and `XDG_*` variables
 5. Verify `python3 -c "import minimal_game_launcher"` works when `PYTHONPATH` points to `build/appdir/usr/lib/minimal-game-launcher`
 6. Verify `style.css`, icon, and desktop entry are present
-7. Confirm `build.sh` exits cleanly and produces `dist/Minimal-Game-Launcher.AppImage`
+7. Confirm `build.sh` exits cleanly and produces the versioned AppImage in `dist/`
 
 An AppImage runtime smoke under an isolated `HOME`/`XDG_*` with
 `APPIMAGE_EXTRACT_AND_RUN=1` stayed alive, created only an isolated

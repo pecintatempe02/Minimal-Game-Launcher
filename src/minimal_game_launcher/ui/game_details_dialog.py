@@ -113,6 +113,11 @@ class GameDetailsDialog(Adw.Dialog, DialogSignalOwner):
             "MangoHud",
             "Enabled" if self._game.mangohud_enabled else "Disabled",
         )
+        self._add_value_row(
+            performance,
+            "Upscale resolution (gamescope)",
+            self._game.gamescope_resolution or "Disabled",
+        )
 
         files = Adw.PreferencesGroup(title="Files")
         page.add(files)

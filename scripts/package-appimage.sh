@@ -1,5 +1,6 @@
 #!/bin/sh
-# Package the staged AppDir into dist/Minimal-Game-Launcher.AppImage.
+# Package the staged AppDir into a versioned AppImage in dist/ and write a
+# SHA-256 checksum beside it.
 # Runtime resolution order:
 #   1. APPIMAGE_RUNTIME env
 #   2. runtime-x86_64 beside detected appimagetool executable
@@ -11,7 +12,15 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 STAGING="$ROOT/build/appdir"
 DIST="$ROOT/dist"
-APPIMAGE="$DIST/Minimal-Game-Launcher.AppImage"
+VERSION=$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' "$ROOT/src/minimal_game_launcher/__init__.py")
+
+if [ -z "$VERSION" ]; then
+  echo "ERROR: could not read APP_VERSION from src/minimal_game_launcher/__init__.py" >&2
+  exit 1
+fi
+
+ARTIFACT="Minimal-Game-Launcher-$VERSION-x86_64.AppImage"
+APPIMAGE="$DIST/$ARTIFACT"
 
 mkdir -p -- "$DIST"
 
@@ -86,4 +95,11 @@ echo "Runtime (--runtime-file): $RUNTIME"
 
 ARCH=x86_64 "$APPIMAGETOOL_CMD" --runtime-file "$RUNTIME" "$STAGING" "$APPIMAGE"
 
+# Publish the checksum as a separate release asset.
+(
+  cd "$DIST"
+  sha256sum "$ARTIFACT" > "$ARTIFACT.sha256"
+)
+
 echo "Packaging complete: $APPIMAGE"
+echo "Checksum: $DIST/$ARTIFACT.sha256"

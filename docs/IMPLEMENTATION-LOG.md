@@ -4,7 +4,7 @@
 planned phases. This file must not contain fabricated work or unverified test
 results.
 
-**Last updated:** 2026-11-05
+**Last updated:** 2026-11-06
 
 ---
 
@@ -40,6 +40,9 @@ them.
 | Step 7 | uncommitted | Hybrid ISO mount fix: disable partition scan on the read-only loop device |
 | Step 8 | uncommitted | Post-install executable discovery, explicit destination types, no unused managed game directory |
 | Step 9 | uncommitted | Pending-install removal with confirmation, verified managed cleanup, and a result popup |
+
+Steps 1–11 were later committed in `d58ab02` and `3c50f17`. The `uncommitted`
+labels above record the state when each entry was written.
 
 ### 1.1 Historical technical decisions worth preserving
 
@@ -90,46 +93,25 @@ them.
 
 ## 2. Current baseline
 
-**Verified 2026-11-05**
+**Verified 2026-11-06**
 
 - Branch: `main`
-- HEAD: `6112d451ba97e541cd41e1335eb3e9aa81366129`
-  (`Phase 7: Add configurable GTK theme system`)
+- HEAD: `6be412282be75df05b102f2f7c06895e99c6b27d` (`updating .gitignore`)
 - Version: `0.5.0`
-- Library schema: v5 (Step 1 added `games.environment`, Step 3 added install/
-  source paths and ownership flags, Step 4 added `installer_sessions`)
-- No staged changes, stashes, or tags.
-- Dirty working tree:
-  - post-Phase-7 UI/theme/cover/README work remains modified
-  - Step 1 modified `database.py`, `models.py`, `game_manager.py`,
-    `launch_manager.py`, `game_editor_dialog.py`, and two test files
-  - Step 2 added `services/diagnostics.py`, `ui/diagnostics_dialog.py`,
-    `tests/test_diagnostics.py`, and wired diagnostics into the application,
-    main window, game card, and game details dialog
-  - Step 3 added `services/ownership.py` and `tests/test_ownership.py`, extended
-    `paths.py`, `models.py`, `database.py`, `game_manager.py`, `application.py`,
-    and refactored diagnostics prefix classification onto the ownership service
-  - Step 4 added `services/iso_mount.py`, `services/installer_manager.py`,
-    `ui/installer_dialog.py`, their tests, schema v5, and installer wiring
-  - Step 5 added `services/cleanup.py`, `ui/cleanup_dialog.py`,
-    `tests/test_cleanup.py`, and rewired removal/orphan entry points in
-    `application.py` and `ui/main_window.py`
-  - Step 6 fixed the non-relocatable AppImage desktop entry in
-    `scripts/build-appdir.sh` and added `tests/test_packaging.py`; no
-    application source or schema changed
-  - Step 7 added `--no-partition-scan` to the read-only loop setup in
-    `services/iso_mount.py`, added an actionable non-mountable-filesystem error,
-    and updated `tests/test_iso_mount.py`; no schema, UI, or mounting mechanism
-    changed
-  - untracked `HANDOFF.md`, packaging scripts/docs, bundled SVG, and the `docs/`
-    specifications
+- Library schema: v7 (Step 1 added `games.environment`, Step 3 added install/
+  source paths and ownership flags, Step 4 added `installer_sessions`, v7 added
+  `installer_sessions.source_kind`)
+- No staged changes, stashes, or tags at baseline.
+- Working tree is clean; Steps 1–11 are committed in `d58ab02` and `3c50f17`.
+- v0.5.0 release preparation changes are described at the end of this file.
 - Test command:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src pytest -q -p no:cacheprovider
 ```
 
-- Test result after Step 7: **409 passed, 51 warnings in 51.78s**
+- Test result after Step 11: **604 passed, 51 warnings in 62.09s**
+- Fresh release-preparation run on 2026-11-06: **604 passed, 51 warnings in 62.71s**
 
 The previous handoff was stale: it recorded HEAD `02683dc` and 220 tests. The
 current baseline supersedes those figures.
@@ -164,13 +146,17 @@ The audit was read-only and made no code changes.
 
 | Step | Feature | Status |
 |---|---|---|
-| 1 | Command / external application launching | Implemented (uncommitted) |
-| 2 | On-demand diagnostics | Implemented (uncommitted) |
-| 3 | Ownership and data-management foundation | Implemented (uncommitted) |
-| 4 | ISO game installer | Implemented (uncommitted) |
-| 5 | Cleanup UI and orphan detection | Implemented (uncommitted) |
-| 6 | Final integration and testing | Completed (uncommitted) |
-| 7 | Hybrid ISO mount compatibility | Completed (uncommitted) |
+| 1 | Command / external application launching | Implemented (committed) |
+| 2 | On-demand diagnostics | Implemented (committed) |
+| 3 | Ownership and data-management foundation | Implemented (committed) |
+| 4 | ISO game installer | Implemented (committed) |
+| 5 | Cleanup UI and orphan detection | Implemented (committed) |
+| 6 | Final integration and testing | Completed (committed) |
+| 7 | Hybrid ISO mount compatibility | Completed (committed) |
+| 8 | Executable discovery and registration | Completed (committed) |
+| 9 | Pending-install removal | Completed (committed) |
+| 10 | Direct installer and desktop launcher | Completed (committed) |
+| 11 | Memory management fixes | Completed (committed) |
 
 Dependencies:
 
@@ -737,7 +723,7 @@ accepted; the remaining decisions are not.
   isolated `library.db` and `launcher.log`, and logged no GTK criticals.
   Cross-distribution portability was not tested and is not claimed.
 - Real ISO: exactly one suitable image was present,
-  `~/Downloads/Plants Vs. Zombies.iso` (420,012,032 bytes, SHA-256
+  `~/Downloads/<game>.iso` (420,012,032 bytes, SHA-256
   `67d4107924e3078fef70404cc15adfd4b6c676dca71c72deaca144aded72f3b3`). The image
   is a hybrid ISO9660 + Apple Partition Map disc. Production
   `IsoMountService.mount()` could not mount it on this host:
@@ -810,7 +796,7 @@ accepted; the remaining decisions are not.
 - `HANDOFF.md`
 
 ### Verification
-- Image facts: `~/Downloads/Plants Vs. Zombies.iso`, 420,012,032 bytes,
+- Image facts: `~/Downloads/<game>.iso`, 420,012,032 bytes,
   SHA-256 `67d4107924e3078fef70404cc15adfd4b6c676dca71c72deaca144aded72f3b3`.
   `file` reports `ISO 9660 CD-ROM filesystem data 'PVZPCMC_EN'`; `blkid -p`
   reports `TYPE="iso9660"`, `LABEL="PVZPCMC-EN"`,
@@ -823,7 +809,7 @@ accepted; the remaining decisions are not.
 - After the fix, `udisksctl loop-setup --read-only --no-partition-scan` produced
   `loop0` with no partition children; `gdbus introspect` showed
   `UDisks2.Filesystem`; production `IsoMountService.mount()` returned
-  `/run/media/onirafu/PVZPCMC-EN`.
+  `/run/media/<user>/<VOLUME-LABEL>`.
 - Verification script (`/tmp/opencode/verify_iso_mount.py`) observed: `ro=1` in
   `/sys/block/loop0/ro`; exactly one `/proc/self/mountinfo` entry,
   `ro,nosuid,nodev,relatime ... - iso9660 /dev/loop0 ro,...`; 8 readable
@@ -1438,3 +1424,58 @@ dependency, no version bump.
   overstate a real Hyprland/GPU session depending on the driver; no real
   session was measured.
 - Steps 1–10 and this step remain uncommitted. No Git mutation was performed.
+
+---
+
+## v0.5.0 release preparation
+
+**Status:** prepared, not committed or tagged, 2026-11-06.
+
+### Changes
+- `build.sh` cleanup now uses `"$ROOT/build"` instead of the relative `"build/"`,
+  so invoking the script from another working directory can no longer delete an
+  unrelated `build/` directory. `$STAGING` was already repository-rooted.
+- `.gitignore` now covers Python/coverage/type-checker/editor caches, virtual
+  environments, root-level `build/` and `dist/`, AppImage artifacts and
+  checksums, SQLite databases and sidecars, logs, and local secrets. Comments
+  record that tracked source lives in `src/`, `tests/`, `scripts/`,
+  `packaging/`, and `docs/`.
+- `scripts/package-appimage.sh` derives the application version from
+  `src/minimal_game_launcher/__init__.py`, writes
+  `Minimal-Game-Launcher-0.5.0-x86_64.AppImage`, and writes a matching
+  `.sha256` file for release publication.
+- The desktop entry template carries `X-AppImage-Version=0.5.0` for the AppImage
+  metadata convention. `Version=1.5` remains the Desktop Entry specification
+  version.
+- Added an MIT `LICENSE` (copyright holder `pecintatempe02`) after the user
+  selected MIT for v0.5.0; README documents the license.
+- `dist/Minimal-Game-Launcher.AppImage` is no longer tracked by Git; the local
+  file is preserved. `dist/` and `*.AppImage` are ignored so release binaries
+  are published as GitHub Release assets.
+- README clone instructions use the configured repository URL, release-asset
+  names are documented, and the test command uses the isolated invocation.
+- Current-state documentation records version `0.5.0`, schema v7, HEAD
+  `6be4122`, and the committed state. Historical step records are preserved.
+
+### Verification
+- `sh -n build.sh scripts/build-appdir.sh scripts/package-appimage.sh`
+  succeeds.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src pytest -q -p no:cacheprovider`
+  → **604 passed, 51 warnings in 62.71s**, no skips.
+- Targeted GTK/UI subset (`test_theme_ui`, `test_installer_ui`,
+  `test_cover_integration`, `test_desktop_integration`) under
+  `dbus-run-session` with isolated `HOME`/`XDG_*`: **72 passed**.
+- Packaging check: `tests/test_packaging.py` builds an isolated AppDir with
+  `MGL_APPDIR` and validates relocatable desktop entries, the managed marker,
+  the AppImage version key, and the staged package files.
+- The original AppImage was not rebuilt. Its SHA-256 remains
+  `9f6e9a9f76b6a205e80123ddf219b8b10412bf9682912f931c14ca18c68b604d`
+  (1,083,896 bytes).
+- License: MIT, added as `LICENSE` at the user's direction.
+
+### Remaining release blockers
+- Review and commit the release-preparation changes, then create the v0.5.0 tag
+  and GitHub Release assets outside this preparation session.
+- Rebuild the versioned AppImage only after the release commit is reviewed; the
+  current AppImage predates the versioned artifact name and checksum output.

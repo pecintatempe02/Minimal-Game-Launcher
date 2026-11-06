@@ -36,6 +36,8 @@ _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 # The launcher owns these values during launch. Allowing a stored override
 # would let a per-game environment change Wine isolation or MangoHud state.
 _RESERVED_ENVIRONMENT = frozenset({"WINEPREFIX", "MANGOHUD"})
+_GAMESCOPE_RESOLUTION = re.compile(r"([0-9]{1,4})x([0-9]{1,4})\Z")
+_GAMESCOPE_LIMIT = 7680
 
 
 def _utc_now() -> str:
@@ -79,6 +81,33 @@ class GameManager:
                 "Use quotes to group an argument that contains spaces.",
                 field="launch_arguments",
             ) from error
+
+    @staticmethod
+    def parse_gamescope_resolution(text: str) -> str:
+        """Validate an optional ``WIDTHxHEIGHT`` gamescope render resolution.
+
+        An empty value disables gamescope for the game. The value is stored in
+        its canonical lowercase form so the launch wrapper never has to guess.
+        """
+        value = text.strip().lower()
+        if not value:
+            return ""
+        match = _GAMESCOPE_RESOLUTION.match(value)
+        if match is None:
+            raise GameValidationError(
+                "The upscale resolution must look like 800x600.",
+                field="gamescope_resolution",
+            )
+        width, height = (int(part) for part in match.groups())
+        if not (1 <= width <= _GAMESCOPE_LIMIT) or not (
+            1 <= height <= _GAMESCOPE_LIMIT
+        ):
+            raise GameValidationError(
+                f"The upscale resolution must be between 1x1 and "
+                f"{_GAMESCOPE_LIMIT}x{_GAMESCOPE_LIMIT}.",
+                field="gamescope_resolution",
+            )
+        return f"{width}x{height}"
 
     @staticmethod
     def parse_environment(text: str) -> dict[str, str]:
@@ -231,6 +260,9 @@ class GameManager:
 
         launch_arguments = draft.launch_arguments.strip()
         self.split_launch_arguments(launch_arguments)
+        gamescope_resolution = self.parse_gamescope_resolution(
+            draft.gamescope_resolution
+        )
         environment = self.parse_environment(draft.environment)
 
         cover_path: str | None = None
@@ -251,6 +283,7 @@ class GameManager:
                 launch_arguments=launch_arguments,
                 environment="",
                 cover_path=cover_path,
+                gamescope_resolution=gamescope_resolution,
             ),
             environment,
         )
@@ -330,6 +363,7 @@ class GameManager:
                 wine_prefix_path=prefix_path,
                 gamemode_enabled=normalized.gamemode_enabled,
                 mangohud_enabled=normalized.mangohud_enabled,
+                gamescope_resolution=normalized.gamescope_resolution,
                 created_at=timestamp,
                 updated_at=timestamp,
                 environment=environment,
@@ -403,6 +437,7 @@ class GameManager:
                 wine_prefix_path=prefix_path,
                 gamemode_enabled=normalized.gamemode_enabled,
                 mangohud_enabled=normalized.mangohud_enabled,
+                gamescope_resolution=normalized.gamescope_resolution,
                 created_at=existing.created_at if existing else timestamp,
                 updated_at=timestamp,
                 environment=environment,
@@ -447,6 +482,7 @@ class GameManager:
                 wine_prefix_path=prefix_path,
                 gamemode_enabled=normalized.gamemode_enabled,
                 mangohud_enabled=normalized.mangohud_enabled,
+                gamescope_resolution=normalized.gamescope_resolution,
                 created_at=existing.created_at,
                 updated_at=_utc_now(),
                 environment=environment,

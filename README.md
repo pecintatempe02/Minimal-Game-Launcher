@@ -52,8 +52,8 @@ still starts.
 The installer is user-level. It writes only under `~/.local` and needs no root.
 
 ```sh
-git clone <repository-url> minimalist-game-launcher
-cd minimalist-game-launcher
+git clone https://github.com/pecintatempe02/Minimalist-Game-Launcher.git
+cd Minimalist-Game-Launcher
 scripts/install.sh
 ```
 
@@ -69,6 +69,12 @@ This installs:
 
 Set `PREFIX=/some/path` to install elsewhere. If `~/.local/bin` is not on
 `PATH`, run the full path.
+
+Release builds are published as
+`Minimal-Game-Launcher-0.5.0-x86_64.AppImage` with a matching `.sha256`
+checksum. The AppImage uses the host GTK4/libadwaita/PyGObject runtime; it was
+verified only on the build host and cross-distribution portability is not
+claimed.
 
 Uninstall:
 
@@ -460,10 +466,14 @@ launcher can parse.
   rewritten (a trailing comment on that line is dropped), and a file with no
   `[theme]` section gets one appended rather than reordered.
 
+## License
+
+Minimal Game Launcher is released under the MIT License. See `LICENSE`.
+
 ## Tests
 
 ```sh
-pytest
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src pytest -q -p no:cacheprovider
 ```
 
 The tests use temporary databases, fake subprocesses, and a headless GLib main

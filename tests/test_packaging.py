@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_ID = "io.github.minimal_game_launcher.MinimalGameLauncher"
+APP_VERSION = re.search(
+    r'^APP_VERSION = "([^"]+)"$',
+    (ROOT / "src" / "minimal_game_launcher" / "__init__.py").read_text(
+        encoding="utf-8"
+    ),
+    re.MULTILINE,
+).group(1)
 
 
 def test_appdir_desktop_entries_are_relocatable_and_complete(
@@ -34,6 +42,8 @@ def test_appdir_desktop_entries_are_relocatable_and_complete(
     text = entries[0].read_text(encoding="utf-8")
     assert "Exec=minimal-game-launcher" in text
     assert "X-MGL-Managed=true" in text
+    assert f"X-AppImage-Version={APP_VERSION}" in text
+    assert "Version=1.5" in text
     assert str(ROOT) not in text
     assert str(staging) not in text
     assert "X-MGL-Managed=true" in root_entry

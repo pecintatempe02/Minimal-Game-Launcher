@@ -28,14 +28,16 @@ from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 
 GAMEMODERUN = "/usr/bin/gamemoderun"
 MANGOHUD = "/usr/bin/mangohud"
+GAMESCOPE = "/usr/bin/gamescope"
 
 
 def _availability(
     gamemoderun: str | None = GAMEMODERUN,
     mangohud: str | None = MANGOHUD,
+    gamescope: str | None = GAMESCOPE,
 ) -> PerformanceAvailability:
     return PerformanceAvailability(
-        gamemoderun=gamemoderun, mangohud=mangohud
+        gamemoderun=gamemoderun, mangohud=mangohud, gamescope=gamescope
     )
 
 
@@ -267,9 +269,10 @@ def test_detection_uses_the_injected_which() -> None:
 
     availability = PerformanceManager(which=which).detect()
 
-    assert calls == ["gamemoderun", "mangohud"]
+    assert calls == ["gamemoderun", "mangohud", "gamescope"]
     assert availability.gamemoderun == GAMEMODERUN
     assert availability.mangohud == MANGOHUD
+    assert availability.gamescope is None
     assert availability.gamemode_available
     assert availability.mangohud_available
 
@@ -449,3 +452,77 @@ def test_disabled_wrappers_skip_detection(
         "en US",
     )
     assert spec.warnings == ()
+
+
+def test_gamescope_upscales_at_the_outermost_layer(
+    manager: GameManager, tmp_path: Path
+) -> None:
+    """A fixed resolution is wrapped in gamescope, outside GameMode/MangoHud."""
+    game = _wine_game(
+        manager,
+        tmp_path,
+        gamemode_enabled=True,
+        mangohud_enabled=True,
+        gamescope_resolution="800x600",
+    )
+    plan = PerformanceManager().compose(
+        game,
+        ("/usr/bin/wine", "game.exe"),
+        _environment(),
+        _availability(),
+    )
+
+    assert plan.command == (
+        GAMESCOPE,
+        "-f",
+        "-w",
+        "800",
+        "-h",
+        "600",
+        "--",
+        GAMEMODERUN,
+        "/usr/bin/wine",
+        "game.exe",
+    )
+    assert plan.warnings == ()
+
+
+def test_missing_gamescope_falls_back_with_warning(
+    manager: GameManager, tmp_path: Path
+) -> None:
+    """Without gamescope the game still launches, at its own resolution."""
+    game = _wine_game(
+        manager,
+        tmp_path,
+        gamemode_enabled=False,
+        mangohud_enabled=False,
+        gamescope_resolution="800x600",
+    )
+    plan = PerformanceManager().compose(
+        game,
+        ("/usr/bin/wine", "game.exe"),
+        _environment(),
+        _availability(gamescope=None),
+    )
+
+    assert plan.command == ("/usr/bin/wine", "game.exe")
+    assert len(plan.warnings) == 1
+    assert "gamescope was not found" in plan.warnings[0]
+
+
+def test_no_gamescope_wrapper_without_a_resolution(
+    manager: GameManager, tmp_path: Path
+) -> None:
+    """The empty default never wraps or warns about gamescope."""
+    game = _wine_game(
+        manager, tmp_path, gamemode_enabled=False, mangohud_enabled=False
+    )
+    plan = PerformanceManager().compose(
+        game,
+        ("/usr/bin/wine", "game.exe"),
+        _environment(),
+        _availability(gamescope=None),
+    )
+
+    assert plan.command == ("/usr/bin/wine", "game.exe")
+    assert plan.warnings == ()

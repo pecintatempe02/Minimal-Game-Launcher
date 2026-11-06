@@ -1,7 +1,7 @@
 # Minimal Game Launcher — Feature Roadmap & Architecture Specification
 
 **Status:** Durable specification for the phases after the 0.5.0 baseline.  
-**Last updated:** 2026-11-05  
+**Last updated:** 2026-11-06  
 **Implementation state:** Steps 1 (command / external application
 launching), 2 (on-demand diagnostics), 3 (ownership and data-management
 foundation), 4 (ISO game installer), and 5 (cleanup UI / orphan detection) are
@@ -12,7 +12,9 @@ mounting of hybrid ISO9660 + Apple Partition Map images. Step 8 adds read-only
 post-installation executable discovery and stops creating an unused managed
 game directory for Wine-prefix installs. Step 9 adds pending-install removal
 with confirmation and a result popup. Step 10 adds standalone `.exe` installers
-and an opt-in user desktop launcher entry. Steps 1–10 remain uncommitted.
+and an opt-in user desktop launcher entry. Steps 1–10 and the memory-management
+follow-up are committed at HEAD `6be4122`; v0.5.0 release preparation is in
+progress.
 
 This document records requirements and proposed architecture. Recommendations
 are explicitly marked **Proposed — not accepted**. Open decisions are collected
@@ -30,17 +32,18 @@ not yet marked accepted.
 ### 1.1 Verified baseline
 
 - Application version: `0.5.0`
-- HEAD: `6112d45` (`Phase 7: Add configurable GTK theme system`)
-- Library schema: v5, `games` plus `installer_sessions` (Step 1 added
+- HEAD: `6be4122` (`updating .gitignore`)
+- Library schema: v7, `games` plus `installer_sessions` (Step 1 added
   `environment`; Step 3 added install/source paths and non-owned-by-default
-  ownership flags; Step 4 added installer sessions)
+  ownership flags; Step 4 added installer sessions; v7 adds
+  `installer_sessions.source_kind`)
 - Existing launch paths: Linux native/command and Windows through per-game Wine
   prefixes
 - Existing removal behavior: metadata-only by default; Step 5 adds explicit
   verified managed-data cleanup while preserving files by default
 - Existing diagnostics: rotating log, short user-facing launch errors,
   on-demand read-only diagnostics (Step 2), and on-demand cleanup previews
-- Existing tests: **444 passed** on 2026-11-05 (Step 9)
+- Existing tests: **604 passed** on 2026-11-06 (full suite, no skips)
 
 ### 1.2 Cross-cutting principles
 
@@ -542,7 +545,7 @@ ISO9660 + Apple Partition Map image. Root cause: UDisks parsed the APM and
 withheld the whole-disk `Filesystem` interface, so `udisksctl mount` returned
 `... is not a mountable filesystem` even though `blkid` reports ISO9660. Passing
 `--no-partition-scan` to `udisksctl loop-setup` fixed the production mount. The
-real image mounted read-only at `/run/media/onirafu/PVZPCMC-EN` with
+real image mounted read-only at `/run/media/<user>/<VOLUME-LABEL>` with
 `ro,nosuid,nodev` and filesystem type `iso9660`; its contents were readable,
 unmount succeeded, no loop backing remained, and the SHA-256 was unchanged.
 General hybrid-ISO support is not claimed. UDF-only images remain unverified and
@@ -782,6 +785,9 @@ appears correct.
 
 ## 11. Step 6 final verification record
 
+> These records reflect the state when each step was written. Steps 1–11 were
+> later committed in `d58ab02` and `3c50f17`; current state is in §1.1.
+
 **Status:** completed and uncommitted. This section records what was actually
 executed; see `docs/IMPLEMENTATION-LOG.md` §Step 6 for the full entry.
 
@@ -812,7 +818,7 @@ executed; see `docs/IMPLEMENTATION-LOG.md` §Step 6 for the full entry.
 
 **Status:** completed and uncommitted. See `docs/IMPLEMENTATION-LOG.md` §Step 7.
 
-- Real image: `~/Downloads/Plants Vs. Zombies.iso`, 420,012,032 bytes, SHA-256
+- Real image: `~/Downloads/<game>.iso`, 420,012,032 bytes, SHA-256
   `67d4107924e3078fef70404cc15adfd4b6c676dca71c72deaca144aded72f3b3`.
   `file` reports ISO 9660; `blkid -p` reports `TYPE="iso9660"` and
   `PTTYPE="mac"`.
@@ -824,7 +830,7 @@ executed; see `docs/IMPLEMENTATION-LOG.md` §Step 6 for the full entry.
   loop-setup` argv. UDisks then exposed `Filesystem` on `loop0` and mounted the
   ISO9660 filesystem read-only.
 - Verified mount options: `/proc/self/mountinfo` showed one entry for
-  `/dev/loop0` at `/run/media/onirafu/PVZPCMC-EN` with `ro,nosuid,nodev` and
+  `/dev/loop0` at `/run/media/<user>/<VOLUME-LABEL>` with `ro,nosuid,nodev` and
   superblock type `iso9660`. Unmount removed the entry; `losetup -a` was empty;
   the SHA-256 was unchanged.
 - End-to-end production staging on the real image mounted, verified 33 files and

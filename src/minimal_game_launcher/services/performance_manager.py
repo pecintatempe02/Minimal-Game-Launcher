@@ -43,6 +43,7 @@ class PerformanceAvailability:
 
     gamemoderun: str | None
     mangohud: str | None
+    gamescope: str | None = None
 
     @property
     def gamemode_available(self) -> bool:
@@ -53,6 +54,11 @@ class PerformanceAvailability:
     def mangohud_available(self) -> bool:
         """Return whether the ``mangohud`` wrapper is installed."""
         return self.mangohud is not None
+
+    @property
+    def gamescope_available(self) -> bool:
+        """Return whether the ``gamescope`` compositor is installed."""
+        return self.gamescope is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +86,7 @@ class PerformanceManager:
         return PerformanceAvailability(
             gamemoderun=self._which("gamemoderun"),
             mangohud=self._which("mangohud"),
+            gamescope=self._which("gamescope"),
         )
 
     def compose(
@@ -101,8 +108,12 @@ class PerformanceManager:
             # Avoid PATH lookups when both optional integrations are disabled.
             current = (
                 self.detect()
-                if game.gamemode_enabled or game.mangohud_enabled
-                else PerformanceAvailability(gamemoderun=None, mangohud=None)
+                if game.gamemode_enabled
+                or game.mangohud_enabled
+                or game.gamescope_resolution
+                else PerformanceAvailability(
+                    gamemoderun=None, mangohud=None, gamescope=None
+                )
             )
         command = list(base_command)
         child_environment = dict(environment)
@@ -159,6 +170,38 @@ class PerformanceManager:
                 )
                 LOGGER.warning(
                     "GameMode requested for %s but unavailable", game.name
+                )
+
+        if game.gamescope_resolution:
+            if current.gamescope:
+                # gamescope owns the outermost layer: it runs a private X server
+                # at the game's fixed resolution and upscales that buffer to the
+                # display, so the game never has to change the host mode.
+                width, height = game.gamescope_resolution.split("x", 1)
+                command = [
+                    current.gamescope,
+                    "-f",
+                    "-w",
+                    width,
+                    "-h",
+                    height,
+                    "--",
+                    *command,
+                ]
+                LOGGER.info(
+                    "Upscaling %s from %s with gamescope",
+                    game.name,
+                    game.gamescope_resolution,
+                )
+            else:
+                warnings.append(
+                    f"This game is set to render at "
+                    f"{game.gamescope_resolution} and be upscaled by "
+                    "gamescope, but gamescope was not found in PATH. The game "
+                    "will launch at its own resolution instead."
+                )
+                LOGGER.warning(
+                    "gamescope requested for %s but unavailable", game.name
                 )
 
         return PerformancePlan(

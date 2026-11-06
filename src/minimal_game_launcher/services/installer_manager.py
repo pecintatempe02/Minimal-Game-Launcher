@@ -1123,6 +1123,7 @@ class InstallerManager:
                 cover_path=existing.cover_path,
                 gamemode_enabled=existing.gamemode_enabled,
                 mangohud_enabled=existing.mangohud_enabled,
+                gamescope_resolution=existing.gamescope_resolution,
             )
         return GameDraft(
             name=session.game_name,

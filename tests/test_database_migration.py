@@ -86,6 +86,7 @@ def test_fresh_database_gets_current_schema(tmp_path: Path) -> None:
     database.close()
     assert _version(path) == SCHEMA_VERSION
     assert "wine_prefix_shared" in _columns(path, "games")
+    assert "gamescope_resolution" in _columns(path, "games")
     assert "wine_prefix_path" in _columns(path, "installer_sessions")
 
 

@@ -44,6 +44,9 @@ class GameDraft:
     # rendered output and may be unsupported by some games or graphics APIs.
     gamemode_enabled: bool = True
     mangohud_enabled: bool = False
+    # Fixed-resolution upscaling through gamescope, as ``WIDTHxHEIGHT``. Empty
+    # means the game is launched without gamescope.
+    gamescope_resolution: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +78,9 @@ class Game:
     #: explicit ownership metadata; a path is never treated as shared merely
     #: because of its directory name.
     wine_prefix_shared: bool = False
+    #: ``WIDTHxHEIGHT`` the game renders at, upscaled to the display by
+    #: gamescope. Empty means gamescope is not used for this game.
+    gamescope_resolution: str = ""
 
 
 class InstallerSourceKind(StrEnum):

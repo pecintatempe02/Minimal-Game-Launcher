@@ -83,6 +83,7 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
         self._pending_cover_source: Path | None = None
         self._gamemode_enabled = game.gamemode_enabled if game else True
         self._mangohud_enabled = game.mangohud_enabled if game else False
+        self._gamescope_resolution = game.gamescope_resolution if game else ""
 
         self.set_content_width(620)
         self.set_content_height(700)
@@ -230,6 +231,18 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
         self._mangohud_row.set_active(self._mangohud_enabled)
         performance_group.add(self._mangohud_row)
 
+        # gamescope renders the game at a fixed resolution and upscales it to
+        # the display. This is what makes a game with an 800x600 back buffer
+        # fill a modern monitor instead of a corner of it.
+        self._gamescope_row = Adw.EntryRow(title="Upscale resolution")
+        self._gamescope_row.set_text(self._gamescope_resolution)
+        self._gamescope_row.set_tooltip_text(
+            "Optional, for example 800x600. gamescope renders the game at "
+            "this resolution and scales it to the display. Leave empty to "
+            "launch without gamescope."
+        )
+        performance_group.add(self._gamescope_row)
+
         cover_group = Adw.PreferencesGroup(
             title="Cover",
             description=(
@@ -328,6 +341,16 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
         else:
             self._mangohud_row.set_subtitle(
                 "mangohud found in PATH. Enabled games launch through it."
+            )
+
+        if not self._availability.gamescope_available:
+            self._gamescope_row.set_subtitle(
+                "gamescope was not found in PATH. An upscale resolution "
+                "cannot be applied."
+            )
+        else:
+            self._gamescope_row.set_subtitle(
+                "gamescope found in PATH. Empty disables upscaling."
             )
 
     def _refresh_cover_row(self) -> None:
@@ -543,6 +566,7 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
             cover_path=cover_path,
             gamemode_enabled=self._gamemode_row.get_active(),
             mangohud_enabled=self._mangohud_row.get_active(),
+            gamescope_resolution=self._gamescope_row.get_text(),
         )
         try:
             if self._game:

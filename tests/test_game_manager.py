@@ -564,3 +564,53 @@ def test_unresolvable_command_is_rejected(
             _linux_draft("Missing Command", "definitely-not-installed")
         )
     assert manager.list_games() == []
+
+
+def test_gamescope_resolution_persists_and_is_canonicalized(
+    manager: GameManager, tmp_path: Path
+) -> None:
+    """A fixed upscale resolution is stored lower-case and survives a reload."""
+    executable = tmp_path / "upscaled.exe"
+    executable.write_bytes(b"MZ")
+
+    game = manager.add_game(
+        _windows_draft(
+            "Upscaled", executable, gamescope_resolution=" 800X600 "
+        )
+    )
+
+    assert game.gamescope_resolution == "800x600"
+    assert manager.get_game(game.id).gamescope_resolution == "800x600"
+
+    updated = manager.update_game(
+        game.id, _windows_draft("Upscaled", executable)
+    )
+    assert updated.gamescope_resolution == ""
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("800", "must look like 800x600"),
+        ("800*600", "must look like 800x600"),
+        ("0x600", "between 1x1"),
+        ("8000x9000", "between 1x1"),
+    ],
+)
+def test_gamescope_resolution_validation_rejects_invalid_input(
+    manager: GameManager,
+    tmp_path: Path,
+    text: str,
+    message: str,
+) -> None:
+    """Malformed resolutions never reach the database."""
+    executable = tmp_path / "invalid.exe"
+    executable.write_bytes(b"MZ")
+
+    with pytest.raises(GameValidationError, match=message):
+        manager.add_game(
+            _windows_draft(
+                "Invalid", executable, gamescope_resolution=text
+            )
+        )
+    assert manager.list_games() == []

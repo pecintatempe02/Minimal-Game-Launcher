@@ -1,6 +1,6 @@
 #!/bin/sh
 # Minimal Game Launcher — AppImage build entry point.
-# Produces build/appdir (always) and attempts dist/Minimal-Game-Launcher.AppImage.
+# Produces build/appdir (always) and attempts a versioned AppImage in dist/.
 # BLOCKER: final packaging requires appimagetool + a runtime binary.
 
 set -eu
@@ -16,8 +16,9 @@ if [ -f "$STAGING/AppRun" ]; then
   echo "+ AppDir already exists at $STAGING (cleaning first)"
 fi
 
-# Clean only our build outputs, not user/home paths
-rm -rf -- "$STAGING" "build/"
+# Clean only our build outputs, not user/home paths. The build directory is
+# resolved from the repository root so the script is safe from any cwd.
+rm -rf -- "$STAGING" "$ROOT/build"
 mkdir -p -- "$STAGING"
 
 sh -c 'exec "$@"' sh "$ROOT/scripts/build-appdir.sh"

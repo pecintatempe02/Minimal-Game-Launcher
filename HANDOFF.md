@@ -1,11 +1,10 @@
 # HANDOFF — Minimal Game Launcher
 
 **Last updated:** 2026-11-06  
-**Current phase:** Step 11 — memory management fixes for cards, dialogs, the
-cover cache, and image validation (uncommitted), following Steps 1–10 and the
-Wine prefix stabilization pass.  
-**Implementation status:** Steps 1–11 implemented, audited, and tested. Working
-tree remains uncommitted.
+**Current phase:** v0.5.0 release preparation: safety fixes, versioned release
+artifact support, Git tracking cleanup, and documentation synchronization.  
+**Implementation status:** Steps 1–11 implemented, audited, tested, and committed
+at HEAD `6be4122`. Release-preparation changes are uncommitted.
 
 **Current status (verified 2026-11-06):**
 - Database schema **v7**, with each migration atomic (one `BEGIN IMMEDIATE`
@@ -41,8 +40,11 @@ tree remains uncommitted.
   (64 MiB) with file-identity invalidation and dead-entry pruning. Image
   headers are checked before decode; `MAX_COVER_PIXELS` 12 MP and
   `MAX_COVER_DIMENSION` 10 000 cap every cover path.
-- Latest verified test count: **604 passed**, 51 warnings in 62.09 s (full
-  suite, no skips). Direct-installer and desktop-settings GTK smoke rc=0.
+- License: **MIT** (`LICENSE`), selected for v0.5.0.
+- Latest verified test count: **604 passed**, 51 warnings in 62.71 s (full
+  suite, no skips), from the release-preparation run on 2026-11-06.
+- Release artifact: `Minimal-Game-Launcher-0.5.0-x86_64.AppImage` plus a
+  `.sha256` checksum; the existing local AppImage was not rebuilt.
 - Remaining limitations: see `docs/IMPLEMENTATION-LOG.md` Step 11 and §6
   "Remaining Issues".
 
@@ -73,117 +75,21 @@ See `docs/FEATURE-ROADMAP.md` for the durable product specification and
 
 ## 2. Current repository state
 
-**Verified on 2026-11-05**
+**Verified on 2026-11-06**
 
 - Branch: `main`
-- HEAD: `6112d451ba97e541cd41e1335eb3e9aa81366129`
-- HEAD subject: `Phase 7: Add configurable GTK theme system`
-- Staged changes: none
+- HEAD: `6be412282be75df05b102f2f7c06895e99c6b27d` (`updating .gitignore`)
+- Staged changes: none at baseline
 - Stashes: none
 - Tags: none
+- Working tree: clean at baseline; Steps 1–11 are committed in `d58ab02` and
+  `3c50f17`
+- v0.5.0 release preparation leaves uncommitted edits to `build.sh`,
+  `.gitignore`, `README.md`, packaging, tests, and documentation. The local
+  `dist/Minimal-Game-Launcher.AppImage` is preserved but removed from Git
+  tracking; that index removal is the only staged change.
 
-### Working tree is dirty — do not reset it
-
-Modified tracked files:
-
-```text
-packaging/io.github.minimal_game_launcher.MinimalGameLauncher.desktop
-README.md
-src/minimal_game_launcher/application.py
-src/minimal_game_launcher/database.py
-src/minimal_game_launcher/errors.py
-src/minimal_game_launcher/models.py
-src/minimal_game_launcher/paths.py
-src/minimal_game_launcher/services/cover_manager.py
-src/minimal_game_launcher/services/game_manager.py
-src/minimal_game_launcher/services/launch_manager.py
-src/minimal_game_launcher/settings.py
-src/minimal_game_launcher/ui/cover.py
-src/minimal_game_launcher/ui/cover_selection_dialog.py
-src/minimal_game_launcher/ui/game_card.py
-src/minimal_game_launcher/ui/game_details_dialog.py
-src/minimal_game_launcher/ui/game_editor_dialog.py
-src/minimal_game_launcher/ui/main_window.py
-src/minimal_game_launcher/ui/settings_dialog.py
-src/minimal_game_launcher/ui/style.css
-src/minimal_game_launcher/ui/theme.py
-tests/test_cover_cache.py
-tests/test_cover_integration.py
-tests/test_cover_manager.py
-tests/test_game_manager.py
-tests/test_launch_manager.py
-tests/test_performance_manager.py
-tests/test_theme_ui.py
-```
-
-Untracked files:
-
-```text
-build.sh
-docs/
-HANDOFF.md
-scripts/build-appdir.sh
-scripts/package-appimage.sh
-src/minimal_game_launcher/services/cleanup.py
-src/minimal_game_launcher/services/desktop_integration.py
-src/minimal_game_launcher/services/diagnostics.py
-src/minimal_game_launcher/services/executable_discovery.py
-src/minimal_game_launcher/services/installer_manager.py
-src/minimal_game_launcher/services/iso_mount.py
-src/minimal_game_launcher/services/ownership.py
-src/minimal_game_launcher/services/prefixes.py
-src/minimal_game_launcher/services/prefix_lock.py
-src/minimal_game_launcher/ui/cleanup_dialog.py
-src/minimal_game_launcher/ui/diagnostics_dialog.py
-src/minimal_game_launcher/ui/installer_dialog.py
-src/minimal_game_launcher/ui/io.github.minimal_game_launcher.MinimalGameLauncher.svg
-src/minimal_game_launcher/ui/lifecycle.py
-tests/test_cleanup.py
-tests/test_database_migration.py
-tests/test_desktop_integration.py
-tests/test_diagnostics.py
-tests/test_direct_installer.py
-tests/test_executable_discovery.py
-tests/test_installer_manager.py
-tests/test_installer_protection.py
-tests/test_installer_ui.py
-tests/test_iso_mount.py
-tests/test_lifecycle.py
-tests/test_ownership.py
-tests/test_packaging.py
-tests/test_pending_removal.py
-tests/test_prefix_lock.py
-tests/test_shared_assignment_rejection.py
-tests/test_shared_lifecycle_concurrency.py
-tests/test_wine_prefix_strategy.py
-```
-
-The README, application, cover, card, main-window, CSS, theme, and related test
-changes are post-Phase-7 follow-up work. The Step 1 changes are the database,
-model, game-manager, launch-manager, editor, and test updates. Step 2 adds the
-diagnostics service, dialog, tests, and small wiring changes in the application,
-main window, game card, and details dialog. Step 3 adds the ownership service,
-its tests, `paths.py`, `errors.py`, schema v4, game-manager metadata
-preservation, composition-root wiring, and the diagnostics classification
-refactor. Step 4 adds the ISO mount service, installer manager, installer
-dialogs, schema v5, registration handoff, wiring, and their tests. Step 5 adds
-the cleanup service, cleanup/orphan dialogs, and their tests, and rewires game
-removal plus a header orphan action in the main window. Step 6 fixes the
-non-relocatable AppImage desktop entry and adds `tests/test_packaging.py`; it
-changes no application source or schema. Step 7 adds `--no-partition-scan` to
-the read-only `udisksctl loop-setup` call and an actionable filesystem-detection
-error, and updates `tests/test_iso_mount.py`; it changes no schema or UI. Step 8
-adds read-only post-install executable discovery, explicit destination types,
-and the finish-page registration flow; it changes no schema. Step 9 adds
-pending-install removal with an explicit confirmation, verified managed cleanup,
-and a result popup. Step 10 adds direct `.exe` installer sessions and opt-in
-desktop launcher integration. Step 11 adds signal-ownership lifecycles for cards
-and dialogs, card reuse on unchanged refreshes, a byte-budgeted cover cache, and
-pre-decode image limits. All sets are uncommitted. Do not reset, stash, checkout,
-or overwrite them.
-
-`HANDOFF.md` and the untracked files under `docs/` are deliberately untracked.
-Do not stage or commit anything without explicit user approval.
+Do not commit, tag, or push without explicit user approval.
 
 ### Latest verified test result
 
@@ -194,6 +100,9 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src pytest -q -p no:cacheprovider tests
 ```
 
 Result after Step 11: **604 passed, 51 warnings in 62.09s**
+
+Fresh release-preparation run on 2026-11-06: **604 passed, 51 warnings in
+62.71s**, no skips.
 
 The 51 warnings are the unchanged GTK/PyGObject deprecations and GTK allocation
 warnings. No test failures were observed, and no warning was suppressed. The
@@ -215,17 +124,17 @@ probes, or touch the user's application data.
 | Database recovery | Completed | Phase 6; damaged DB set aside, never deleted |
 | Desktop entry and user install | Completed | Phase 6 |
 | Process reattachment and safe shutdown | Completed | Phase 6.1; pidfile identity, no signaling |
-| Theme system | Completed | Phase 7 committed; follow-up edits uncommitted |
-| Command / external app launching | Completed (uncommitted) | Step 1; existing Linux path, schema v3 |
-| On-demand diagnostics | Completed (uncommitted) | Step 2; read-only service, dialog, text export |
-| Ownership / cleanup foundation | Completed (uncommitted) | Step 3; classification, size estimation, safe deletion, schema v4 |
-| ISO game installer | Completed (uncommitted) | Step 4; read-only mount, full staging/verification, discovery, defer/resume, schema v5 |
-| Hybrid ISO mount compatibility | **Completed (uncommitted)** | Step 7; `--no-partition-scan` lets UDisks mount a hybrid ISO9660+APM whole disk |
-| Executable discovery and registration | **Completed (uncommitted)** | Step 8; read-only ranked candidates, explicit destination types, no unused `games/<game-id>` directory |
-| Pending-install removal | **Completed (uncommitted)** | Step 9; confirmed removal of staging, prefix, and owned destination, result popup, external folders kept |
-| Cleanup UI / orphan detection | Completed (uncommitted) | Step 5; verified managed-data deletion, on-demand orphan scan |
-| Final integration and testing | Completed (uncommitted) | Step 6; full suite, schema matrix, integration, GTK smoke, real-ISO content, packaging fix |
-| Memory management | Completed (uncommitted) | Step 11; signal ownership, card reuse, byte-budgeted cover cache, pre-decode image limits |
+| Theme system | Completed | Phase 7 and follow-ups committed |
+| Command / external app launching | Completed (committed) | Step 1; existing Linux path, schema v3 |
+| On-demand diagnostics | Completed (committed) | Step 2; read-only service, dialog, text export |
+| Ownership / cleanup foundation | Completed (committed) | Step 3; classification, size estimation, safe deletion, schema v4 |
+| ISO game installer | Completed (committed) | Step 4; read-only mount, full staging/verification, discovery, defer/resume, schema v5 |
+| Hybrid ISO mount compatibility | **Completed (committed)** | Step 7; `--no-partition-scan` lets UDisks mount a hybrid ISO9660+APM whole disk |
+| Executable discovery and registration | **Completed (committed)** | Step 8; read-only ranked candidates, explicit destination types, no unused `games/<game-id>` directory |
+| Pending-install removal | **Completed (committed)** | Step 9; confirmed removal of staging, prefix, and owned destination, result popup, external folders kept |
+| Cleanup UI / orphan detection | Completed (committed) | Step 5; verified managed-data deletion, on-demand orphan scan |
+| Final integration and testing | Completed (committed) | Step 6; full suite, schema matrix, integration, GTK smoke, real-ISO content, packaging fix |
+| Memory management | Completed (committed) | Step 11; signal ownership, card reuse, byte-budgeted cover cache, pre-decode image limits |
 
 The previous feature audit found no ISO, diagnostics, cleanup, or ownership
 implementation in the current source. Step 2 adds diagnostics; Step 3 adds the
@@ -263,7 +172,7 @@ remain unimplemented by design.
 
 ### Database
 
-`database.py`, schema **v5**, with the existing `games` table plus
+`database.py`, schema **v7**, with the existing `games` table plus
 `installer_sessions`.
 
 `games` columns: `id`, `name`, `platform`, `executable`, `working_directory`,
@@ -629,7 +538,7 @@ of Step 6.
 What Step 7 did:
 
 - Reproduced the production workflow on the real image
-  `~/Downloads/Plants Vs. Zombies.iso` (420,012,032 bytes, SHA-256
+  `~/Downloads/<game>.iso` (420,012,032 bytes, SHA-256
   `67d4107924e3078fef70404cc15adfd4b6c676dca71c72deaca144aded72f3b3`).
   `blkid -p` reports `TYPE="iso9660"` and `PTTYPE="mac"`; UDisks exposes a
   `PartitionTable` interface (`Type='mac'`) and children `loop0p1`/`loop0p2`
@@ -655,20 +564,21 @@ What Step 7 did:
   the managed staging directory removed through the ownership service. The ISO
   was unchanged.
 
-The working tree remains dirty: Steps 1–11 are uncommitted and several files are
-untracked. No Git history operation was performed.
+At the time of Step 11, the working tree contained uncommitted Steps 1–11. They
+were later committed in `d58ab02` and `3c50f17`; no Git history operation was
+performed during this preparation.
 
 ---
 
 ## 6. Exact next task
 
-**Immediate action: wait for explicit user instruction. Step 11 is complete;
-do not start another development phase.**
+**Immediate action: review the v0.5.0 release-preparation changes and choose a
+license. Do not start another development phase.**
 
-Do not add automatic deletion, background monitoring, dependency installation,
-game termination, prefix migration, extraction fallback, UDF fallback, or
-multi-disc support without explicit approval. The working tree must remain
-uncommitted until the user requests otherwise.
+Release preparation is complete but uncommitted. Do not add automatic deletion,
+background monitoring, dependency installation, game termination, prefix
+migration, extraction fallback, UDF fallback, or multi-disc support without
+explicit approval.
 
 Outstanding limitations to keep visible:
 
@@ -704,7 +614,7 @@ Outstanding limitations to keep visible:
 1. Read this file completely.
 2. Read `docs/FEATURE-ROADMAP.md` and `docs/IMPLEMENTATION-LOG.md`.
 3. Run `git status --porcelain=v1 -uall` and `git log --oneline -5`.
-   The dirty working tree described above is expected.
+   Release-preparation changes are expected to be uncommitted.
 4. Verify the test baseline with:
 
    ```sh
@@ -713,8 +623,8 @@ Outstanding limitations to keep visible:
 
 5. Inspect the actual source before trusting any historical note.
 6. Do not implement a feature until the user explicitly requests it.
-7. When implementing, preserve the existing dirty-tree work and follow the
-   layering rules in §4.
+7. When implementing, preserve the existing release-preparation changes and
+   follow the layering rules in §4.
 8. Record each completed step in `docs/IMPLEMENTATION-LOG.md` using the entry
    format defined there.
 9. Do not stage or commit unless the user explicitly approves.
@@ -739,7 +649,7 @@ These carry forward from earlier phases:
 7. Never run `open_library()` recovery against user data.
 8. Do not commit, amend, stage, stash, reset, or rebase without explicit user
    approval.
-9. Preserve all uncommitted and untracked user work, including AppImage/packaging
+9. Preserve all uncommitted release-preparation work, including packaging
    scripts and the bundled SVG.
 
 ---
@@ -750,16 +660,18 @@ Detailed phase history, review corrections, and the audit baseline are in
 `docs/IMPLEMENTATION-LOG.md`. Key historical facts:
 
 - Phases 1–7 are committed through `6112d45`.
+- Steps 1–11 were later committed in `d58ab02` and `3c50f17` (HEAD
+  `6be4122`). The list below records the historical sequence.
 - Phase 6.1 added read-only process reattachment and safe shutdown
   (`1df58fa`), bounded cover decoding (`a2cd938`), and SteamGridDB
   conformance verification (`02683dc`).
 - Phase 7 added the theme system.
-- The current working tree contains uncommitted post-Phase-7 follow-up work,
-  the Step 1 command-launching implementation, the Step 2 diagnostics
-  implementation, the Step 3 ownership foundation, the Step 4 ISO installer,
-  the Step 5 cleanup/orphan work, the Step 6 integration fixes, the Step 7
-  hybrid mount fix, and the Step 8 executable-discovery work, and the Step 9
-  pending-install removal work.
+- Post-Phase-7 work included the Step 1 command-launching implementation, the
+  Step 2 diagnostics implementation, the Step 3 ownership foundation, the Step
+  4 ISO installer, the Step 5 cleanup/orphan work, the Step 6 integration
+  fixes, the Step 7 hybrid mount fix, the Step 8 executable-discovery work, the
+  Step 9 pending-install removal work, Step 10 direct installers/desktop
+  integration, and Step 11 memory fixes.
 - The previous handoff was stale: it recorded HEAD `02683dc` and 220 tests.
 - Step 1 adds command launching, per-game environment support, and schema v3;
   the verified result is **290 tests** at HEAD `6112d45`.

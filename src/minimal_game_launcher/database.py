@@ -23,7 +23,7 @@ from minimal_game_launcher.models import (
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _SQLITE_HEADER = b"SQLite format 3\x00"
 
 #: Full schema for a brand-new database. Each entry is one statement so it can
@@ -52,6 +52,7 @@ _SCHEMA: tuple[str, ...] = (
                           CHECK (installer_source_owned IN (0, 1)),
         wine_prefix_shared INTEGER NOT NULL DEFAULT 0
                           CHECK (wine_prefix_shared IN (0, 1)),
+        gamescope_resolution TEXT NOT NULL DEFAULT '',
         created_at        TEXT NOT NULL,
         updated_at        TEXT NOT NULL
     )
@@ -176,6 +177,15 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CHECK (source_kind IN ('iso', 'executable'))",
         ),
     ),
+    (
+        # Optional fixed-resolution upscaling through gamescope. Existing rows
+        # keep the empty default, which means "launch without gamescope".
+        8,
+        (
+            "ALTER TABLE games ADD COLUMN gamescope_resolution "
+            "TEXT NOT NULL DEFAULT ''",
+        ),
+    ),
 )
 
 
@@ -265,6 +275,7 @@ class Database:
             installer_source_directory=row["installer_source_directory"],
             installer_source_owned=bool(row["installer_source_owned"]),
             wine_prefix_shared=bool(row["wine_prefix_shared"]),
+            gamescope_resolution=row["gamescope_resolution"],
         )
 
     @staticmethod
@@ -364,8 +375,9 @@ class Database:
                     gamemode_enabled, mangohud_enabled, environment,
                     install_directory, install_directory_owned,
                     installer_source_directory, installer_source_owned,
-                    wine_prefix_shared, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    wine_prefix_shared, gamescope_resolution,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     game.id,
@@ -384,6 +396,7 @@ class Database:
                     game.installer_source_directory,
                     int(game.installer_source_owned),
                     int(game.wine_prefix_shared),
+                    game.gamescope_resolution,
                     game.created_at,
                     game.updated_at,
                 ),
@@ -410,6 +423,7 @@ class Database:
                     installer_source_directory = ?,
                     installer_source_owned = ?,
                     wine_prefix_shared = ?,
+                    gamescope_resolution = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -429,6 +443,7 @@ class Database:
                     game.installer_source_directory,
                     int(game.installer_source_owned),
                     int(game.wine_prefix_shared),
+                    game.gamescope_resolution,
                     game.updated_at,
                     game.id,
                 ),
