@@ -1,0 +1,43 @@
+[package]
+name = "mgl"
+version = "0.1.0"
+edition = "2024"
+description = "MGL — Minimal Game Launcher (native Rust remake)"
+license = "MIT"
+
+[[bin]]
+name = "mgl"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[dependencies]
+# Native window + input. Wayland first (Hyprland), X11 kept as a fallback.
+winit = { version = "0.30", default-features = false, features = ["wayland", "x11", "rwh_06"] }
+# GPU rendering: one quad pipeline draws everything (rounded rects, borders, glyphs, covers).
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "vulkan", "gles"] }
+# Text shaping and layout.
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash", "shape-run-cache"] }
+# The font database cosmic-text shapes against; used directly only to register
+# the bundled subsets and the on-demand fallback face.
+fontdb = { version = "0.23", default-features = false, features = ["std", "fs"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+# SQLite through the system library keeps the binary small and avoids a C build.
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = { version = "0.4", features = ["std"] }
+# PNG is decoded natively for covers and thumbnails. JPEG/WebP use an optional
+# system converter, so no large codec dependency is required.
+png = "0.17"
+
+[features]
+default = ["gui"]
+gui = []
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
