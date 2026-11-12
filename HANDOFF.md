@@ -1,51 +1,43 @@
 # HANDOFF — Minimal Game Launcher
 
-**Last updated:** 2026-11-06  
-**Current phase:** v0.5.0 release preparation: safety fixes, versioned release
-artifact support, Git tracking cleanup, and documentation synchronization.  
-**Implementation status:** Steps 1–11 implemented, audited, tested, and committed
-at HEAD `6be4122`. Release-preparation changes are uncommitted.
+**Last updated:** 2026-11-07
+**Current phase:** v0.6.0 feature set implemented and tested; uncommitted.
+**Implementation status:** Steps 1–12 implemented. Steps 1–11 are committed at
+HEAD `072ee85`; v0.5.0 release preparation and the v0.6.0 feature set are
+uncommitted.
 
-**Current status (verified 2026-11-06):**
-- Database schema **v7**, with each migration atomic (one `BEGIN IMMEDIATE`
-  transaction per version, including `user_version`). v7 adds
-  `installer_sessions.source_kind` (`iso`/`executable`, default `iso`) for
-  direct standalone-installer sessions.
-- Wine prefix strategy support: per-game and shared prefixes, chosen in settings.
-- Prefix readiness marker `.minigame-launcher-prefix`, written only after a
-  validated `wineboot`.
-- Inter-process locking: initialization lock (300 s, held through `wineboot`)
-  and lifecycle lock (10 s, for shared-reference writes and deletion). Order:
-  lifecycle, then initialization.
-- Installer failure protection: `FAILED` sessions are protected from cleanup
-  and remain resumable; `INSTALLING` is persisted before launch and reverted on
-  refusal.
-- Stale-assignment rule: a shared reference is refused with
-  `SharedPrefixUnavailableError` when the assignment had to wait for the lifecycle
-  lock and `.shared` is gone afterward. Nothing is persisted. Re-saves of an
-  already-persisted reference are not refused. `.shared` is never created by this
-  path.
-- Direct installer support: standalone Windows `.exe` files are validated
-  (regular, non-empty, readable, `.exe`, `MZ`), copied alone into managed
-  staging, verified, and then reuse the existing prefix, launch, discovery,
-  registration, resume, and ownership paths. No MSI or companion-data support.
-- Desktop launcher integration: one opt-in user-level entry and icon named
-  after `APP_ID`, marked `X-MGL-Managed=true`, with atomic writes,
-  `Hidden=true` system-entry override handling, AppImage/AppDir/installed/
-  wrapper/source launch detection, and `desktop_entry_enabled: bool | None`.
-- Memory management: `GameCard` and every dialog now disconnect their owned
-  child-widget handlers and drop transient references on close, so cards and
-  dialogs are garbage-collected; unchanged library refreshes reuse cards
-  instead of rebuilding them. The cover cache is bounded by decoded bytes
-  (64 MiB) with file-identity invalidation and dead-entry pruning. Image
-  headers are checked before decode; `MAX_COVER_PIXELS` 12 MP and
-  `MAX_COVER_DIMENSION` 10 000 cap every cover path.
-- License: **MIT** (`LICENSE`), selected for v0.5.0.
-- Latest verified test count: **604 passed**, 51 warnings in 62.71 s (full
-  suite, no skips), from the release-preparation run on 2026-11-06.
-- Release artifact: `Minimal-Game-Launcher-0.5.0-x86_64.AppImage` plus a
-  `.sha256` checksum; the existing local AppImage was not rebuilt.
-- Remaining limitations: see `docs/IMPLEMENTATION-LOG.md` Step 11 and §6
+**Current status (verified 2026-11-07):**
+- Database schema **v9**, with each migration atomic (one `BEGIN IMMEDIATE`
+  transaction per version, including `user_version`). v8 added
+  `games.gamescope_resolution`; v9 adds `show_in_library`, `display_mode`,
+  `virtual_desktop_resolution`, and the full gamescope control set
+  (`gamescope_enabled`, output resolution, FPS limit, vsync, filter,
+  fullscreen). v9 defaults preserve pre-0.6.0 behavior.
+- Per-game library visibility: hidden games stay in the database and are
+  excluded from normal listing/search but remain reachable through the hidden
+  games manager. Cleanup and orphan detection still see every record.
+- Wine runtime diagnostics: Windows launch output is captured to a bounded
+  64 KiB buffer, persisted to `<state>/launch-logs/<game-id>.log`, and analyzed
+  on demand for 12 recognizable Wine error patterns.
+- Per-game Winecfg and Winetricks: explicit, on-demand actions that verify the
+  prefix through `OwnershipService`, refuse external prefixes, validate
+  Winetricks verbs, use argv lists only, and detach without waiting.
+- Per-game display configuration: display mode (`default`, `fullscreen`,
+  `windowed`, `borderless`, `virtual_desktop`), Wine virtual desktop through
+  `wine explorer /desktop=MGL-<id8>,WxH`, and the full gamescope control set.
+  Explicit gamescope is a hard launch requirement when missing.
+- First-run setup wizard: four informational/preference steps, skippable, and
+  persisted through `settings.json` as `setup_completed`. It installs nothing
+  and creates no prefix.
+- No new daemon, polling loop, startup scan, or automatic dependency install.
+  Tool detection is a single `PATH` lookup only when a page or dialog is shown.
+- Latest verified test count: **645 passed**, 52 warnings in 62.48 s (full
+  suite, no skips), 2026-11-07.
+- GTK smoke test: the real application starts under `dbus-run-session` with
+  isolated `XDG_*` directories, opens `MainWindow`, shows `SetupWizard` on
+  first run, and exposes the Wine tools and hidden-games paths without a
+  traceback.
+- Remaining limitations: see `docs/IMPLEMENTATION-LOG.md` Step 12 and §6
   "Remaining Issues".
 
 This file is the entry point for a new development session. Facts marked
@@ -75,10 +67,10 @@ See `docs/FEATURE-ROADMAP.md` for the durable product specification and
 
 ## 2. Current repository state
 
-**Verified on 2026-11-06**
+**Verified on 2026-11-07**
 
 - Branch: `main`
-- HEAD: `6be412282be75df05b102f2f7c06895e99c6b27d` (`updating .gitignore`)
+- HEAD: `072ee85` (`Preparing for Releases`)
 - Staged changes: none at baseline
 - Stashes: none
 - Tags: none
@@ -431,6 +423,46 @@ not moved.
 ---
 
 ## 5. Current development phase
+
+**Step 12 — v0.6.0 Feature Set** is complete but uncommitted. It adds the
+features below without adding a service, daemon, or automatic installer.
+
+What Step 12 did:
+
+- Schema v9: added `show_in_library`, `display_mode`,
+  `virtual_desktop_resolution`, `gamescope_enabled`,
+  `gamescope_output_resolution`, `gamescope_fps_limit`, `gamescope_vsync`,
+  `gamescope_filter`, and `gamescope_fullscreen` to `games`. The v9 migration
+  is transactional and refuses newer schemas. `Game.gamescope_active` keeps
+  the legacy rule (`gamescope_enabled or bool(gamescope_resolution)`).
+- Library visibility: `GameManager.list_games()` excludes hidden records by
+  default; `list_hidden_games()` and `set_library_visibility()` back the
+  hidden-games manager. Cleanup and orphan scans still call the unfiltered
+  path, so hidden games are never treated as orphaned.
+- Display and gamescope: `DisplayMode` validation, Windows-only virtual
+  desktop with a required `WxH`, and the full gamescope argv
+  (`-w/-h`, `-W/-H`, `-f`, `--fps-limit`, `--vsync-enabled`, `-F`, `--`).
+  An explicit gamescope request now raises `LaunchError` when the binary is
+  missing instead of silently dropping the overlay.
+- Wine runtime diagnostics: Windows launches pipe combined output through
+  `_BoundedCapture` (64 KiB, daemon reader), write
+  `<state>/launch-logs/<game-id>.log` with an `exit_status=` header, and
+  analyze the text with 12 patterns in `services/wine_output.py`. Diagnostics
+  exposes a new "Last launch output" check.
+- Wine tools: `services/wine_tools.py` resolves Wine/Winetricks on demand,
+  verifies the prefix with `OwnershipService`, refuses external and
+  uninitialized prefixes, validates verbs, and detaches with argv lists and
+  per-game logs. The UI adds a Windows-only "Wine tools" action on cards and
+  the details dialog.
+- First-run wizard: `ui/setup_wizard.py` explains the app, detects optional
+  tools once, records the prefix strategy and desktop-entry preference, and
+  persists `setup_completed`. Skip also marks it complete. `SettingsDialog`
+  now preserves the flag instead of resetting it.
+- Verification: **645 passed**, 52 warnings in 62.48 s; a real GTK smoke run
+  under `dbus-run-session` with isolated `XDG_*` directories opened
+  `MainWindow`, showed `SetupWizard`, and exposed the new dialogs without a
+  traceback. No real Wine, Winetricks, gamescope, or installer was run.
+- No version bump, no commit, no tag, and no Git mutation.
 
 **Step 11 — Memory Management Fixes** is complete but uncommitted. It follows
 Step 10 and addresses four measured memory problems.

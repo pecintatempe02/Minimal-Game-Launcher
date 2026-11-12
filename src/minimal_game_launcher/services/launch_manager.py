@@ -37,6 +37,7 @@ from minimal_game_launcher.errors import (  # noqa: E402
     WineNotFoundError,
 )
 from minimal_game_launcher.models import (  # noqa: E402
+    DisplayMode,
     Game,
     Platform,
     is_bare_command,
@@ -56,6 +57,10 @@ from minimal_game_launcher.services.process_identity import (  # noqa: E402
     verify_process,
     write_pidfile,
 )
+from minimal_game_launcher.services.wine_output import (  # noqa: E402
+    MAX_CAPTURE_BYTES,
+    analyze_wine_output,
+)
 from minimal_game_launcher.settings import (  # noqa: E402
     LauncherSettings,
     SettingsStore,
@@ -70,6 +75,56 @@ _MAX_LOG_OUTPUT = 8000
 PopenFactory = Callable[..., subprocess.Popen]
 RunFactory = Callable[..., subprocess.CompletedProcess]
 WhichFactory = Callable[[str], str | None]
+
+
+class _BoundedCapture:
+    """Drain a child's combined output while retaining a bounded prefix.
+
+    A reader thread keeps the pipe from filling (which would block the game) and
+    discards everything past the byte limit. Nothing is decoded or logged until
+    the process exits.
+    """
+
+    def __init__(self, limit: int = MAX_CAPTURE_BYTES) -> None:
+        self._limit = max(1, limit)
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self, stream: object) -> None:
+        """Begin draining ``stream`` on a daemon thread."""
+        self._thread = threading.Thread(
+            target=self._read,
+            args=(stream,),
+            name="game-output-capture",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _read(self, stream: object) -> None:
+        try:
+            while True:
+                chunk = stream.read(4096)  # type: ignore[attr-defined]
+                if not chunk:
+                    break
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8", errors="replace")
+                with self._lock:
+                    room = self._limit - len(self._buffer)
+                    if room > 0:
+                        self._buffer.extend(chunk[:room])
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._done.set()
+
+    def finish(self, timeout: float = 0.5) -> str:
+        """Wait briefly for the reader to finish and return the text."""
+        if self._thread is not None:
+            self._done.wait(timeout)
+        with self._lock:
+            return bytes(self._buffer).decode("utf-8", errors="replace")
 
 
 def prefix_is_initialized(path: str | Path) -> bool:
@@ -112,6 +167,7 @@ class _ActiveLaunch:
     game: Game
     process: subprocess.Popen | None
     attached: bool = False
+    capture: _BoundedCapture | None = None
 
 
 class LaunchManager(GObject.Object):
@@ -205,13 +261,22 @@ class LaunchManager(GObject.Object):
         """Prepare and spawn a process off the GTK main thread."""
         try:
             spec = self.prepare_launch(game)
+            # Wine's own output is the only runtime diagnostic available after
+            # a game fails. Native games keep discarding output.
+            capture = (
+                _BoundedCapture()
+                if spec.platform is Platform.WINDOWS
+                else None
+            )
             process = self._popen_factory(
                 list(spec.command),
                 cwd=spec.cwd,
                 env=spec.env,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                stderr=(
+                    subprocess.STDOUT if capture else subprocess.DEVNULL
+                ),
                 shell=False,
                 close_fds=True,
             )
@@ -238,6 +303,11 @@ class LaunchManager(GObject.Object):
             )
             return
 
+        if capture is not None:
+            stream = getattr(process, "stdout", None)
+            if stream is not None:
+                capture.start(stream)
+
         LOGGER.info(
             "Spawned %s with pid %s: %r",
             game.name,
@@ -245,7 +315,7 @@ class LaunchManager(GObject.Object):
             list(spec.command),
         )
         GLib.idle_add(
-            self._register_process, game, process, spec.warnings
+            self._register_process, game, process, spec.warnings, capture
         )
 
     def _finish_start_failure(self, game_id: str, message: str) -> bool:
@@ -260,6 +330,7 @@ class LaunchManager(GObject.Object):
         game: Game,
         process: subprocess.Popen,
         warnings: tuple[str, ...] = (),
+        capture: _BoundedCapture | None = None,
     ) -> bool:
         """Record a spawned process and surface non-fatal launch warnings."""
         self._starting.discard(game.id)
@@ -269,7 +340,9 @@ class LaunchManager(GObject.Object):
             self._write_launch_pidfile(game, process.pid)
             return GLib.SOURCE_REMOVE
 
-        self._active[game.id] = _ActiveLaunch(game=game, process=process)
+        self._active[game.id] = _ActiveLaunch(
+            game=game, process=process, capture=capture
+        )
         self._write_launch_pidfile(game, process.pid)
         self._ensure_polling()
         for warning in warnings:
@@ -309,6 +382,7 @@ class LaunchManager(GObject.Object):
             if active is None:
                 continue
             self._remove_pidfile(game_id)
+            self._finalize_output(active, returncode)
             LOGGER.info(
                 "%s exited with status %s", active.game.name, returncode
             )
@@ -340,6 +414,51 @@ class LaunchManager(GObject.Object):
         if self._pidfiles_root is None:
             return
         remove_pidfile(self._pidfiles_root, game_id)
+
+    def _launch_log_path(self, game_id: str) -> Path | None:
+        """Return the per-game bounded Wine output log, if state is enabled."""
+        if self._pidfiles_root is None:
+            return None
+        return self._pidfiles_root.parent / "launch-logs" / f"{game_id}.log"
+
+    def _finalize_output(
+        self, active: _ActiveLaunch, returncode: int
+    ) -> None:
+        """Persist and summarize the bounded output of an exited Wine game."""
+        capture = active.capture
+        if capture is None:
+            return
+        active.capture = None
+        text = capture.finish()
+        path = self._launch_log_path(active.game.id)
+        if path is not None:
+            try:
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                descriptor = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0o600,
+                )
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(f"exit_status={returncode}\n{text}")
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
+            except OSError:
+                LOGGER.warning(
+                    "Could not write launch output for %s", active.game.name
+                )
+        analysis = analyze_wine_output(text, exit_status=returncode)
+        if analysis.findings:
+            LOGGER.info(
+                "Launch output for %s: %s",
+                active.game.name,
+                ", ".join(
+                    f"{finding.key}/{finding.confidence}"
+                    for finding in analysis.findings
+                ),
+            )
 
     def _reattached_pidfile_alive(self, game_id: str) -> bool:
         """Return whether a pidfile for this game still tracks a live process.
@@ -408,18 +527,22 @@ class LaunchManager(GObject.Object):
             GLib.source_remove(self._poll_source_id)
             self._poll_source_id = 0
         self._starting.clear()
-        reaped: list[str] = []
+        reaped: list[tuple[str, int]] = []
         for game_id, active in list(self._active.items()):
             if active.attached or active.process is None:
                 continue
             # poll() performs a non-blocking wait, so an exited child is
             # reaped and cannot become a zombie. A running process is left
             # alone entirely.
-            if active.process.poll() is not None:
-                reaped.append(game_id)
-        for game_id in reaped:
+            returncode = active.process.poll()
+            if returncode is not None:
+                reaped.append((game_id, returncode))
+        for game_id, returncode in reaped:
             # The child was collected here; its launch record must not
             # make the next session reattach to a dead PID.
+            active = self._active.get(game_id)
+            if active is not None:
+                self._finalize_output(active, returncode)
             self._remove_pidfile(game_id)
             self._active.pop(game_id, None)
         self._active.clear()
@@ -463,7 +586,9 @@ class LaunchManager(GObject.Object):
             environment = self.build_environment(
                 Platform.WINDOWS, prefix, game.environment
             )
-            base_command = (wine_executable, str(executable), *arguments)
+            base_command = self._wine_command(
+                game, wine_executable, str(executable), arguments
+            )
             plan = self._performance_manager.compose(
                 game, base_command, environment
             )
@@ -493,6 +618,35 @@ class LaunchManager(GObject.Object):
             platform=game.platform,
             warnings=plan.warnings,
         )
+
+    @staticmethod
+    def _wine_command(
+        game: Game,
+        wine_executable: str,
+        executable: str,
+        arguments: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Build the Wine command, including an optional virtual desktop."""
+        if (
+            game.display_mode is DisplayMode.VIRTUAL_DESKTOP
+            and game.virtual_desktop_resolution
+        ):
+            safe_id = "".join(
+                character
+                for character in game.id
+                if character.isascii() and character.isalnum()
+            )[:8] or "game"
+            desktop = f"MGL-{safe_id}"
+            # ``wine explorer /desktop`` owns the desktop size; the game runs
+            # inside it and the host display mode is never changed.
+            return (
+                wine_executable,
+                "explorer",
+                f"/desktop={desktop},{game.virtual_desktop_resolution}",
+                executable,
+                *arguments,
+            )
+        return (wine_executable, executable, *arguments)
 
     def _validated_executable(self, game: Game) -> Path:
         """Resolve and validate the game executable before any process starts."""

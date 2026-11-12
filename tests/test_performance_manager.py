@@ -17,6 +17,7 @@ gi.require_version("GLib", "2.0")
 
 from gi.repository import GLib  # noqa: E402
 
+from minimal_game_launcher.errors import LaunchError  # noqa: E402
 from minimal_game_launcher.models import Game, GameDraft, Platform  # noqa: E402
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
 from minimal_game_launcher.services.launch_manager import LaunchManager  # noqa: E402
@@ -474,11 +475,11 @@ def test_gamescope_upscales_at_the_outermost_layer(
 
     assert plan.command == (
         GAMESCOPE,
-        "-f",
         "-w",
         "800",
         "-h",
         "600",
+        "-f",
         "--",
         GAMEMODERUN,
         "/usr/bin/wine",
@@ -487,10 +488,10 @@ def test_gamescope_upscales_at_the_outermost_layer(
     assert plan.warnings == ()
 
 
-def test_missing_gamescope_falls_back_with_warning(
+def test_missing_gamescope_is_a_launch_error(
     manager: GameManager, tmp_path: Path
 ) -> None:
-    """Without gamescope the game still launches, at its own resolution."""
+    """An explicit gamescope request fails instead of silently downgrading."""
     game = _wine_game(
         manager,
         tmp_path,
@@ -498,16 +499,13 @@ def test_missing_gamescope_falls_back_with_warning(
         mangohud_enabled=False,
         gamescope_resolution="800x600",
     )
-    plan = PerformanceManager().compose(
-        game,
-        ("/usr/bin/wine", "game.exe"),
-        _environment(),
-        _availability(gamescope=None),
-    )
-
-    assert plan.command == ("/usr/bin/wine", "game.exe")
-    assert len(plan.warnings) == 1
-    assert "gamescope was not found" in plan.warnings[0]
+    with pytest.raises(LaunchError, match="gamescope is enabled"):
+        PerformanceManager().compose(
+            game,
+            ("/usr/bin/wine", "game.exe"),
+            _environment(),
+            _availability(gamescope=None),
+        )
 
 
 def test_no_gamescope_wrapper_without_a_resolution(
@@ -526,3 +524,59 @@ def test_no_gamescope_wrapper_without_a_resolution(
 
     assert plan.command == ("/usr/bin/wine", "game.exe")
     assert plan.warnings == ()
+
+
+def test_gamescope_fps_limit_uses_the_supported_flag(
+    manager: GameManager, tmp_path: Path
+) -> None:
+    """gamescope 3.17.0 rejects ``--fps-limit``; the real flag is used."""
+    game = _wine_game(
+        manager,
+        tmp_path,
+        gamemode_enabled=False,
+        mangohud_enabled=False,
+        gamescope_enabled=True,
+        gamescope_fps_limit=60,
+    )
+    plan = PerformanceManager().compose(
+        game,
+        ("/usr/bin/wine", "game.exe"),
+        _environment(),
+        _availability(),
+    )
+
+    assert plan.command == (
+        GAMESCOPE,
+        "-f",
+        "--framerate-limit",
+        "60",
+        "--",
+        "/usr/bin/wine",
+        "game.exe",
+    )
+    assert "--fps-limit" not in plan.command
+    assert plan.warnings == ()
+
+
+def test_gamescope_vsync_is_reported_not_passed_as_an_unknown_flag(
+    manager: GameManager, tmp_path: Path
+) -> None:
+    """No gamescope release has ``--vsync-enabled``; warn instead of failing."""
+    game = _wine_game(
+        manager,
+        tmp_path,
+        gamemode_enabled=False,
+        mangohud_enabled=False,
+        gamescope_enabled=True,
+        gamescope_vsync="on",
+    )
+    plan = PerformanceManager().compose(
+        game,
+        ("/usr/bin/wine", "game.exe"),
+        _environment(),
+        _availability(),
+    )
+
+    assert "--vsync-enabled" not in plan.command
+    assert plan.command[-3:] == ("--", "/usr/bin/wine", "game.exe")
+    assert any("VSync" in warning for warning in plan.warnings)

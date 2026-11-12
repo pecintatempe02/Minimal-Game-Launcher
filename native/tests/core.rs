@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use mgl::app::actions;
+use mgl::app::state::{AppState, Modal};
 use mgl::core::cover;
 use mgl::core::game::{Game, Outcome, RunStatus, RunnerLabel};
 use mgl::core::launcher::Launcher;
 use mgl::core::library::{self, Filter};
 use mgl::core::{paths, process};
 use mgl::storage::{Database, MAX_RECORDS_PER_GAME, SortOrder};
+use mgl::ui::components::Action;
+use mgl::ui::layout::Rect;
 use rusqlite::Connection;
 
 /// `paths` reads `XDG_DATA_HOME` on every call, so tests that point it at a
@@ -285,6 +289,64 @@ fn make_game(id: &str, name: &str) -> Game {
 }
 
 #[test]
+fn game_options_menu_opens_closes_and_reaches_its_sheets() {
+    let _guard = env_lock();
+    let root = temp_dir("ui-menu-data");
+    let config = temp_dir("ui-menu-config");
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", &*root);
+        std::env::set_var("XDG_CONFIG_HOME", &*config);
+    }
+    let db = Database::open(&paths::database_path()).unwrap();
+    db.save_game(&make_game("g", "G")).unwrap();
+    drop(db);
+
+    let mut state = AppState::load().unwrap();
+    assert_eq!(state.games.len(), 1);
+    let anchor = Rect::new(400.0, 100.0, 30.0, 30.0);
+    let open = |state: &mut AppState| {
+        actions::apply(
+            state,
+            Action::OpenGameMenu {
+                game: "g".to_string(),
+                anchor,
+            },
+        );
+    };
+
+    open(&mut state);
+    let menu = state.game_menu.as_ref().expect("menu should open");
+    assert_eq!(menu.game, "g");
+    actions::apply(&mut state, Action::CloseGameMenu);
+    assert!(state.game_menu.is_none());
+
+    open(&mut state);
+    actions::apply(&mut state, Action::OpenLogs("g".to_string()));
+    assert!(state.game_menu.is_none(), "opening a sheet closes the menu");
+    assert!(matches!(state.modal, Some(Modal::Logs(_))));
+    actions::apply(&mut state, Action::Close);
+
+    open(&mut state);
+    actions::apply(&mut state, Action::EditGame("g".to_string()));
+    assert!(state.game_menu.is_none());
+    match &state.modal {
+        Some(Modal::Editor(draft)) => assert_eq!(draft.command, "echo hello"),
+        _ => panic!("edit command should open the editor"),
+    }
+    actions::apply(&mut state, Action::Close);
+
+    open(&mut state);
+    actions::apply(&mut state, Action::OpenRemove("g".to_string()));
+    assert!(state.game_menu.is_none());
+    assert!(matches!(state.modal, Some(Modal::Remove(_))));
+
+    unsafe {
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+}
+
+#[test]
 fn game_rows_round_trip_and_commands_are_not_trimmed() {
     let dir = temp_dir("db-roundtrip");
     let db = Database::open(&dir.join("mgl.db")).unwrap();
@@ -488,4 +550,86 @@ fn database_parameter_binding_is_used_everywhere() {
     let evil = make_game("x'; DROP TABLE games; --", "Evil");
     db.save_game(&evil).unwrap();
     assert_eq!(db.load_games().unwrap().len(), 1);
+}
+
+// ------------------------------------------------------------------ keyboard
+
+/// Keyboard navigation only exists in terms of the visible list, so it is
+/// checked against a real library rather than a mock.
+#[test]
+fn keyboard_selection_moves_by_cells_and_survives_filtering() {
+    let _guard = env_lock();
+    let root = temp_dir("keys-data");
+    let config = temp_dir("keys-config");
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", &*root);
+        std::env::set_var("XDG_CONFIG_HOME", &*config);
+    }
+    let db = Database::open(&paths::database_path()).unwrap();
+    for (index, name) in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+        .iter()
+        .enumerate()
+    {
+        let mut game = Game::new(format!("g{index}"), *name, "true");
+        game.runner = RunnerLabel::Native;
+        db.save_game(&game).unwrap();
+    }
+    drop(db);
+    let mut state = AppState::load().unwrap();
+    assert_eq!(state.games.len(), 5);
+
+    // Down from nothing selects the first card.
+    actions::select_move(&mut state, 3, 0, 1);
+    assert_eq!(actions::selected_position(&state), Some(0));
+
+    // Right stays inside the row, Down moves a whole row.
+    actions::select_move(&mut state, 3, 1, 0);
+    assert_eq!(actions::selected_position(&state), Some(1));
+    actions::select_move(&mut state, 3, 0, 1);
+    assert_eq!(actions::selected_position(&state), Some(4));
+    // Right on the last card of a partial row is a no-op.
+    actions::select_move(&mut state, 3, 1, 0);
+    assert_eq!(actions::selected_position(&state), Some(4));
+
+    actions::select_edge(&mut state, false);
+    assert_eq!(actions::selected_position(&state), Some(0));
+    actions::select_edge(&mut state, true);
+    assert_eq!(actions::selected_position(&state), Some(4));
+
+    // A filter change keeps the selection on the same game while it is visible.
+    let selected = state.selected.clone();
+    state.filter = Filter::Native;
+    assert_eq!(state.selected, selected);
+    assert_eq!(actions::selected_position(&state), Some(4));
+
+    // Removing the selected game clears the selection instead of dangling.
+    let id = state.selected.clone().unwrap();
+    actions::apply(&mut state, Action::OpenRemove(id));
+    actions::apply(&mut state, Action::ConfirmRemove);
+    assert!(state.selected.is_none());
+
+    unsafe {
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+}
+
+#[test]
+fn log_selection_and_reveal_stay_in_bounds() {
+    assert_eq!(actions::step_index(0, -1, 3), 0);
+    assert_eq!(actions::step_index(0, 1, 3), 1);
+    assert_eq!(actions::step_index(2, 1, 3), 2);
+
+    let vp = mgl::ui::layout::Viewport::new(1200.0, 800.0, 1.0);
+    let grid = mgl::ui::screens::grid(vp, false, 20);
+    assert!(grid.columns > 1);
+    // A card below the fold scrolls just enough to be visible.
+    let mut scroll = 0.0;
+    mgl::ui::screens::reveal(&grid, &mut scroll, grid.columns * 3);
+    assert!(scroll > 0.0);
+    assert!(scroll <= grid.max);
+    // Revealing a card above the fold scrolls back up.
+    let mut scroll = 400.0;
+    mgl::ui::screens::reveal(&grid, &mut scroll, 0);
+    assert_eq!(scroll, 0.0);
 }

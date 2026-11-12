@@ -15,6 +15,7 @@ from typing import Callable
 from minimal_game_launcher.database import Database
 from minimal_game_launcher.errors import GameNotFoundError, GameValidationError
 from minimal_game_launcher.models import (
+    DisplayMode,
     Game,
     GameDraft,
     Platform,
@@ -38,6 +39,9 @@ _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _RESERVED_ENVIRONMENT = frozenset({"WINEPREFIX", "MANGOHUD"})
 _GAMESCOPE_RESOLUTION = re.compile(r"([0-9]{1,4})x([0-9]{1,4})\Z")
 _GAMESCOPE_LIMIT = 7680
+_FPS_LIMIT_MAX = 1000
+_VSYNC_VALUES = frozenset({"", "on", "off"})
+_FILTER_VALUES = frozenset({"", "fsr", "nis", "linear", "nearest"})
 
 
 def _utc_now() -> str:
@@ -89,23 +93,32 @@ class GameManager:
         An empty value disables gamescope for the game. The value is stored in
         its canonical lowercase form so the launch wrapper never has to guess.
         """
+        return GameManager._parse_resolution(
+            text,
+            field="gamescope_resolution",
+            description="The upscale resolution",
+        )
+
+    @staticmethod
+    def _parse_resolution(text: str, *, field: str, description: str) -> str:
+        """Validate an optional ``WIDTHxHEIGHT`` value for one field."""
         value = text.strip().lower()
         if not value:
             return ""
         match = _GAMESCOPE_RESOLUTION.match(value)
         if match is None:
             raise GameValidationError(
-                "The upscale resolution must look like 800x600.",
-                field="gamescope_resolution",
+                f"{description} must look like 800x600.",
+                field=field,
             )
         width, height = (int(part) for part in match.groups())
         if not (1 <= width <= _GAMESCOPE_LIMIT) or not (
             1 <= height <= _GAMESCOPE_LIMIT
         ):
             raise GameValidationError(
-                f"The upscale resolution must be between 1x1 and "
+                f"{description} must be between 1x1 and "
                 f"{_GAMESCOPE_LIMIT}x{_GAMESCOPE_LIMIT}.",
-                field="gamescope_resolution",
+                field=field,
             )
         return f"{width}x{height}"
 
@@ -263,6 +276,64 @@ class GameManager:
         gamescope_resolution = self.parse_gamescope_resolution(
             draft.gamescope_resolution
         )
+        gamescope_output_resolution = self._parse_resolution(
+            draft.gamescope_output_resolution,
+            field="gamescope_output_resolution",
+            description="The gamescope output resolution",
+        )
+        gamescope_fps_limit = draft.gamescope_fps_limit
+        if (
+            not isinstance(gamescope_fps_limit, int)
+            or isinstance(gamescope_fps_limit, bool)
+            or not 0 <= gamescope_fps_limit <= _FPS_LIMIT_MAX
+        ):
+            raise GameValidationError(
+                f"The gamescope FPS limit must be between 0 and "
+                f"{_FPS_LIMIT_MAX}.",
+                field="gamescope_fps_limit",
+            )
+        gamescope_vsync = draft.gamescope_vsync.strip().lower()
+        if gamescope_vsync not in _VSYNC_VALUES:
+            raise GameValidationError(
+                "The gamescope vsync value must be empty, on, or off.",
+                field="gamescope_vsync",
+            )
+        gamescope_filter = draft.gamescope_filter.strip().lower()
+        if gamescope_filter not in _FILTER_VALUES:
+            raise GameValidationError(
+                "The gamescope filter must be empty, fsr, nis, linear, or "
+                "nearest.",
+                field="gamescope_filter",
+            )
+        try:
+            display_mode = DisplayMode(draft.display_mode)
+        except (TypeError, ValueError) as error:
+            raise GameValidationError(
+                "Choose a supported display mode.",
+                field="display_mode",
+            ) from error
+        if display_mode is DisplayMode.VIRTUAL_DESKTOP:
+            if draft.platform is not Platform.WINDOWS:
+                raise GameValidationError(
+                    "The Wine virtual desktop is available only for "
+                    "Windows/Wine games.",
+                    field="display_mode",
+                )
+            virtual_desktop_resolution = self._parse_resolution(
+                draft.virtual_desktop_resolution,
+                field="virtual_desktop_resolution",
+                description="The virtual desktop resolution",
+            )
+            if not virtual_desktop_resolution:
+                raise GameValidationError(
+                    "Choose a virtual desktop resolution, for example "
+                    "1280x720.",
+                    field="virtual_desktop_resolution",
+                )
+        else:
+            # A resolution left over from another mode must not resurface when
+            # the user switches back later.
+            virtual_desktop_resolution = ""
         environment = self.parse_environment(draft.environment)
 
         cover_path: str | None = None
@@ -284,6 +355,15 @@ class GameManager:
                 environment="",
                 cover_path=cover_path,
                 gamescope_resolution=gamescope_resolution,
+                gamescope_enabled=bool(draft.gamescope_enabled),
+                gamescope_output_resolution=gamescope_output_resolution,
+                gamescope_fps_limit=gamescope_fps_limit,
+                gamescope_vsync=gamescope_vsync,
+                gamescope_filter=gamescope_filter,
+                gamescope_fullscreen=bool(draft.gamescope_fullscreen),
+                display_mode=display_mode,
+                virtual_desktop_resolution=virtual_desktop_resolution,
+                show_in_library=bool(draft.show_in_library),
             ),
             environment,
         )
@@ -364,6 +444,19 @@ class GameManager:
                 gamemode_enabled=normalized.gamemode_enabled,
                 mangohud_enabled=normalized.mangohud_enabled,
                 gamescope_resolution=normalized.gamescope_resolution,
+                gamescope_enabled=normalized.gamescope_enabled,
+                gamescope_output_resolution=(
+                    normalized.gamescope_output_resolution
+                ),
+                gamescope_fps_limit=normalized.gamescope_fps_limit,
+                gamescope_vsync=normalized.gamescope_vsync,
+                gamescope_filter=normalized.gamescope_filter,
+                gamescope_fullscreen=normalized.gamescope_fullscreen,
+                display_mode=normalized.display_mode,
+                virtual_desktop_resolution=(
+                    normalized.virtual_desktop_resolution
+                ),
+                show_in_library=normalized.show_in_library,
                 created_at=timestamp,
                 updated_at=timestamp,
                 environment=environment,
@@ -438,6 +531,19 @@ class GameManager:
                 gamemode_enabled=normalized.gamemode_enabled,
                 mangohud_enabled=normalized.mangohud_enabled,
                 gamescope_resolution=normalized.gamescope_resolution,
+                gamescope_enabled=normalized.gamescope_enabled,
+                gamescope_output_resolution=(
+                    normalized.gamescope_output_resolution
+                ),
+                gamescope_fps_limit=normalized.gamescope_fps_limit,
+                gamescope_vsync=normalized.gamescope_vsync,
+                gamescope_filter=normalized.gamescope_filter,
+                gamescope_fullscreen=normalized.gamescope_fullscreen,
+                display_mode=normalized.display_mode,
+                virtual_desktop_resolution=(
+                    normalized.virtual_desktop_resolution
+                ),
+                show_in_library=normalized.show_in_library,
                 created_at=existing.created_at if existing else timestamp,
                 updated_at=timestamp,
                 environment=environment,
@@ -483,6 +589,19 @@ class GameManager:
                 gamemode_enabled=normalized.gamemode_enabled,
                 mangohud_enabled=normalized.mangohud_enabled,
                 gamescope_resolution=normalized.gamescope_resolution,
+                gamescope_enabled=normalized.gamescope_enabled,
+                gamescope_output_resolution=(
+                    normalized.gamescope_output_resolution
+                ),
+                gamescope_fps_limit=normalized.gamescope_fps_limit,
+                gamescope_vsync=normalized.gamescope_vsync,
+                gamescope_filter=normalized.gamescope_filter,
+                gamescope_fullscreen=normalized.gamescope_fullscreen,
+                display_mode=normalized.display_mode,
+                virtual_desktop_resolution=(
+                    normalized.virtual_desktop_resolution
+                ),
+                show_in_library=normalized.show_in_library,
                 created_at=existing.created_at,
                 updated_at=_utc_now(),
                 environment=environment,
@@ -529,12 +648,24 @@ class GameManager:
         """Return a single entry by ID."""
         return self._database.get_game(game_id)
 
-    def list_games(self, search: str = "", sort_by: str = SORT_NAME) -> list[Game]:
-        """Return entries filtered by name and sorted for the library UI."""
+    def list_games(
+        self,
+        search: str = "",
+        sort_by: str = SORT_NAME,
+        *,
+        include_hidden: bool = False,
+    ) -> list[Game]:
+        """Return entries filtered by name and sorted for the library UI.
+
+        Hidden games are omitted by default. Management paths that must see
+        every record (cleanup, shared-prefix checks) pass ``include_hidden``.
+        """
         if sort_by not in VALID_SORTS:
             raise ValueError(f"Unsupported sort mode: {sort_by}")
 
         games = self._database.list_games()
+        if not include_hidden:
+            games = [game for game in games if game.show_in_library]
         needle = search.strip().casefold()
         if needle:
             games = [game for game in games if needle in game.name.casefold()]
@@ -544,3 +675,30 @@ class GameManager:
         if sort_by == SORT_RECENT:
             games.sort(key=lambda game: game.created_at, reverse=True)
         return games
+
+    def list_hidden_games(self) -> list[Game]:
+        """Return only entries hidden from the normal library, sorted by name."""
+        return sorted(
+            (
+                game
+                for game in self._database.list_games()
+                if not game.show_in_library
+            ),
+            key=lambda game: (game.name.casefold(), game.created_at),
+        )
+
+    def set_library_visibility(self, game_id: str, visible: bool) -> Game:
+        """Show or hide one entry without changing any other field."""
+        existing = self._database.get_game(game_id)
+        if existing is None:
+            raise GameNotFoundError("This game is no longer in the library.")
+        updated_at = _utc_now()
+        if not self._database.update_visibility(
+            game_id, visible, updated_at
+        ):
+            raise GameNotFoundError("This game is no longer in the library.")
+        return replace(
+            existing,
+            show_in_library=visible,
+            updated_at=updated_at,
+        )

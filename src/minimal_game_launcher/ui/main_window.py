@@ -43,6 +43,9 @@ from minimal_game_launcher.services.performance_manager import (  # noqa: E402
 from minimal_game_launcher.services.steamgriddb import (  # noqa: E402
     SteamGridDBClient,
 )
+from minimal_game_launcher.services.wine_tools import (  # noqa: E402
+    WineToolsService,
+)
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 from minimal_game_launcher.ui.cover import DEFAULT_CACHE  # noqa: E402
 from minimal_game_launcher.ui.cover_selection_dialog import (  # noqa: E402
@@ -58,12 +61,17 @@ from minimal_game_launcher.ui.diagnostics_dialog import (  # noqa: E402
 from minimal_game_launcher.ui.game_card import GameCard  # noqa: E402
 from minimal_game_launcher.ui.game_details_dialog import GameDetailsDialog  # noqa: E402
 from minimal_game_launcher.ui.game_editor_dialog import GameEditorDialog  # noqa: E402
+from minimal_game_launcher.ui.hidden_games_dialog import (  # noqa: E402
+    HiddenGamesDialog,
+)
 from minimal_game_launcher.ui.installer_dialog import (  # noqa: E402
     InstallerDialog,
     PendingInstallsDialog,
 )
 from minimal_game_launcher.ui.settings_dialog import SettingsDialog  # noqa: E402
+from minimal_game_launcher.ui.setup_wizard import SetupWizard  # noqa: E402
 from minimal_game_launcher.ui.theme import ThemeController  # noqa: E402
+from minimal_game_launcher.ui.wine_tools_dialog import WineToolsDialog  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
@@ -93,6 +101,7 @@ class MainWindow(Adw.ApplicationWindow):
         installer_manager: InstallerManager,
         cleanup: CleanupService,
         desktop_integration: DesktopIntegrationService | None = None,
+        wine_tools: WineToolsService,
         recovered_library: Path | None = None,
     ) -> None:
         super().__init__(application=application)
@@ -106,6 +115,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._diagnostics = diagnostics
         self._installer_manager = installer_manager
         self._desktop_integration = desktop_integration
+        self._wine_tools = wine_tools
         self._cleanup = cleanup
         self._active_editor: GameEditorDialog | None = None
         self._active_details: GameDetailsDialog | None = None
@@ -116,6 +126,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._active_orphans: OrphanCleanupDialog | None = None
         self._active_settings: SettingsDialog | None = None
         self._active_cover_dialog: CoverSelectionDialog | None = None
+        self._active_wine_tools: WineToolsDialog | None = None
+        self._active_hidden: HiddenGamesDialog | None = None
+        self._active_wizard: SetupWizard | None = None
         self._active_alert: Adw.AlertDialog | None = None
         self._cards_by_id: dict[str, GameCard] = {}
         self._card_games: tuple[Game, ...] = ()
@@ -141,6 +154,10 @@ class MainWindow(Adw.ApplicationWindow):
                 "is removed from disk.",
                 heading="Library recovered",
             )
+        if not self._settings_store.load().setup_completed:
+            # The wizard only records preferences; defer it so the window is
+            # already visible when the dialog opens.
+            GLib.idle_add(self._open_setup_wizard)
 
     def _build_ui(self) -> Gtk.Widget:
         header = Adw.HeaderBar()
@@ -212,6 +229,13 @@ class MainWindow(Adw.ApplicationWindow):
         cleanup_button.set_tooltip_text("Inspect unused managed data")
         cleanup_button.connect("clicked", lambda _button: self._open_orphans())
         header.pack_end(cleanup_button)
+
+        hidden_button = Gtk.Button.new_from_icon_name("view-reveal-symbolic")
+        hidden_button.set_tooltip_text("Hidden games")
+        hidden_button.connect(
+            "clicked", lambda _button: self._open_hidden_games()
+        )
+        header.pack_end(hidden_button)
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(header)
@@ -315,6 +339,9 @@ class MainWindow(Adw.ApplicationWindow):
             )
             card.connect("edit-requested", self._on_edit_requested)
             card.connect("remove-requested", self._on_remove_requested)
+            card.connect(
+                "wine-tools-requested", self._on_wine_tools_requested
+            )
             card.set_status(self._launch_manager.status(game.id))
             self._cards_by_id[game.id] = card
             self._flowbox.append(card)
@@ -377,6 +404,9 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_remove_requested(self, _card: GameCard, game: Game) -> None:
         self._confirm_remove(game)
 
+    def _on_wine_tools_requested(self, _card: GameCard, game: Game) -> None:
+        self._open_wine_tools(game)
+
     def _launch_game(self, game: Game) -> None:
         if self._launch_manager.is_active(game.id):
             self._set_card_status(game.id, self._launch_manager.status(game.id))
@@ -438,6 +468,9 @@ class MainWindow(Adw.ApplicationWindow):
         dialog.connect("cover-requested", self._on_details_cover_requested)
         dialog.connect("edit-requested", self._on_details_edit_requested)
         dialog.connect("remove-requested", self._on_details_remove_requested)
+        dialog.connect(
+            "wine-tools-requested", self._on_details_wine_tools_requested
+        )
         dialog.connect("closed", self._on_details_closed)
         self._active_details = dialog
         dialog.present(self)
@@ -479,6 +512,12 @@ class MainWindow(Adw.ApplicationWindow):
     ) -> None:
         self._active_details = None
         GLib.idle_add(self._confirm_remove, game)
+
+    def _on_details_wine_tools_requested(
+        self, dialog: GameDetailsDialog, game: Game
+    ) -> None:
+        self._active_details = None
+        GLib.idle_add(self._open_wine_tools, game)
 
     def _open_cover_dialog(self, game: Game) -> None:
         # Re-read the game so the dialog sees a cover applied since the details
@@ -580,6 +619,63 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_diagnostics_closed(self, dialog: DiagnosticsDialog) -> None:
         if self._active_diagnostics is dialog:
             self._active_diagnostics = None
+
+    def _open_wine_tools(self, game: Game) -> None:
+        # Re-read so the dialog sees the current prefix assignment.
+        current = self._manager.get_game(game.id)
+        if current is None:
+            self._toast("This game is no longer in the library")
+            return
+        dialog = WineToolsDialog(current, self._wine_tools)
+        dialog.connect("started", self._on_wine_tool_started)
+        dialog.connect("closed", self._on_wine_tools_closed)
+        self._active_wine_tools = dialog
+        dialog.present(self)
+
+    def _on_wine_tool_started(
+        self, _dialog: WineToolsDialog, message: str
+    ) -> None:
+        self._toast(message, timeout=8)
+
+    def _on_wine_tools_closed(self, dialog: WineToolsDialog) -> None:
+        if self._active_wine_tools is dialog:
+            self._active_wine_tools = None
+
+    def _open_hidden_games(self) -> None:
+        dialog = HiddenGamesDialog(self._manager)
+        dialog.connect("changed", self._on_hidden_games_changed)
+        dialog.connect("closed", self._on_hidden_games_closed)
+        self._active_hidden = dialog
+        dialog.present(self)
+
+    def _on_hidden_games_changed(self, _dialog: HiddenGamesDialog) -> None:
+        self._refresh_library()
+
+    def _on_hidden_games_closed(self, dialog: HiddenGamesDialog) -> None:
+        if self._active_hidden is dialog:
+            self._active_hidden = None
+
+    def _open_setup_wizard(self) -> None:
+        if self._active_wizard is not None:
+            self._active_wizard.present(self)
+            return
+        dialog = SetupWizard(
+            self._settings_store,
+            desktop_integration=self._desktop_integration,
+        )
+        dialog.connect("finished", self._on_wizard_finished)
+        dialog.connect("closed", self._on_wizard_closed)
+        self._active_wizard = dialog
+        dialog.present(self)
+
+    def _on_wizard_finished(
+        self, _dialog: SetupWizard, _settings: object
+    ) -> None:
+        self._toast("Setup complete")
+
+    def _on_wizard_closed(self, dialog: SetupWizard) -> None:
+        if self._active_wizard is dialog:
+            self._active_wizard = None
 
     def _open_installer(
         self,

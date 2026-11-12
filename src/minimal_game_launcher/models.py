@@ -26,6 +26,33 @@ class Platform(StrEnum):
         return "Linux Native" if self is Platform.LINUX else "Windows / Wine"
 
 
+class DisplayMode(StrEnum):
+    """Per-game display preference.
+
+    ``DEFAULT`` changes nothing. Fullscreen, windowed, and borderless are
+    hints that MGL cannot enforce for every game; Wine virtual desktop is
+    enforced through ``wine explorer /desktop`` and gamescope uses its own
+    fullscreen switch.
+    """
+
+    DEFAULT = "default"
+    FULLSCREEN = "fullscreen"
+    WINDOWED = "windowed"
+    BORDERLESS = "borderless"
+    VIRTUAL_DESKTOP = "virtual_desktop"
+
+    @property
+    def display_name(self) -> str:
+        """Return the label shown in the game editor."""
+        return {
+            DisplayMode.DEFAULT: "Default (game decides)",
+            DisplayMode.FULLSCREEN: "Fullscreen (game-controlled)",
+            DisplayMode.WINDOWED: "Windowed (game-controlled)",
+            DisplayMode.BORDERLESS: "Borderless (game-controlled)",
+            DisplayMode.VIRTUAL_DESKTOP: "Wine virtual desktop",
+        }[self]
+
+
 @dataclass(frozen=True, slots=True)
 class GameDraft:
     """User-provided values before validation and persistence."""
@@ -47,6 +74,21 @@ class GameDraft:
     # Fixed-resolution upscaling through gamescope, as ``WIDTHxHEIGHT``. Empty
     # means the game is launched without gamescope.
     gamescope_resolution: str = ""
+    # Optional gamescope controls. ``gamescope_enabled`` is explicit; a
+    # non-empty render resolution keeps the legacy behaviour where setting a
+    # resolution was enough to enable gamescope.
+    gamescope_enabled: bool = False
+    gamescope_output_resolution: str = ""
+    gamescope_fps_limit: int = 0
+    gamescope_vsync: str = ""
+    gamescope_filter: str = ""
+    gamescope_fullscreen: bool = True
+    #: Per-game display preference. Existing games keep ``DEFAULT``.
+    display_mode: DisplayMode = DisplayMode.DEFAULT
+    virtual_desktop_resolution: str = ""
+    #: Hidden games remain in the database and keep all their data, but are
+    #: omitted from the normal library list and search.
+    show_in_library: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +121,28 @@ class Game:
     #: because of its directory name.
     wine_prefix_shared: bool = False
     #: ``WIDTHxHEIGHT`` the game renders at, upscaled to the display by
-    #: gamescope. Empty means gamescope is not used for this game.
+    #: gamescope. Empty means no fixed render resolution.
     gamescope_resolution: str = ""
+    gamescope_enabled: bool = False
+    gamescope_output_resolution: str = ""
+    gamescope_fps_limit: int = 0
+    gamescope_vsync: str = ""
+    gamescope_filter: str = ""
+    gamescope_fullscreen: bool = True
+    display_mode: DisplayMode = DisplayMode.DEFAULT
+    virtual_desktop_resolution: str = ""
+    #: ``False`` hides the entry from the normal library without deleting
+    #: anything. Hidden games are still listed by management and cleanup paths.
+    show_in_library: bool = True
+
+    @property
+    def gamescope_active(self) -> bool:
+        """Return whether gamescope should wrap this game's launch.
+
+        The render resolution keeps the pre-0.6.0 meaning: a game that already
+        stored one continues to use gamescope without a separate flag.
+        """
+        return self.gamescope_enabled or bool(self.gamescope_resolution)
 
 
 class InstallerSourceKind(StrEnum):

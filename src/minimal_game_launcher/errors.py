@@ -31,6 +31,10 @@ class PrefixInitializationError(LaunchError):
     """Raised when ``wineboot`` cannot initialize a game's Wine prefix."""
 
 
+class WineToolError(LauncherError):
+    """Raised when Winecfg or Winetricks cannot be started safely."""
+
+
 class ProcessLaunchError(LaunchError):
     """Raised when the operating system refuses to create a process."""
 

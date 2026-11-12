@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 from minimal_game_launcher.models import (
+    DisplayMode,
     Game,
     InstallerSession,
     InstallerSourceKind,
@@ -23,8 +25,10 @@ from minimal_game_launcher.models import (
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 _SQLITE_HEADER = b"SQLite format 3\x00"
+_WAL_RETRY_SECONDS = 5.0
+_WAL_RETRY_DELAY = 0.05
 
 #: Full schema for a brand-new database. Each entry is one statement so it can
 #: run inside the same explicit transaction as the version stamp.
@@ -53,6 +57,26 @@ _SCHEMA: tuple[str, ...] = (
         wine_prefix_shared INTEGER NOT NULL DEFAULT 0
                           CHECK (wine_prefix_shared IN (0, 1)),
         gamescope_resolution TEXT NOT NULL DEFAULT '',
+        gamescope_enabled INTEGER NOT NULL DEFAULT 0
+                          CHECK (gamescope_enabled IN (0, 1)),
+        gamescope_output_resolution TEXT NOT NULL DEFAULT '',
+        gamescope_fps_limit INTEGER NOT NULL DEFAULT 0,
+        gamescope_vsync TEXT NOT NULL DEFAULT ''
+                          CHECK (gamescope_vsync IN ('', 'on', 'off')),
+        gamescope_filter TEXT NOT NULL DEFAULT ''
+                          CHECK (gamescope_filter IN (
+                              '', 'fsr', 'nis', 'linear', 'nearest'
+                          )),
+        gamescope_fullscreen INTEGER NOT NULL DEFAULT 1
+                          CHECK (gamescope_fullscreen IN (0, 1)),
+        display_mode TEXT NOT NULL DEFAULT 'default'
+                          CHECK (display_mode IN (
+                              'default', 'fullscreen', 'windowed',
+                              'borderless', 'virtual_desktop'
+                          )),
+        virtual_desktop_resolution TEXT NOT NULL DEFAULT '',
+        show_in_library INTEGER NOT NULL DEFAULT 1
+                          CHECK (show_in_library IN (0, 1)),
         created_at        TEXT NOT NULL,
         updated_at        TEXT NOT NULL
     )
@@ -186,6 +210,41 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "TEXT NOT NULL DEFAULT ''",
         ),
     ),
+    (
+        # v0.6.0: library visibility, display preferences, and full gamescope
+        # controls. Every existing row keeps its current behaviour: visible,
+        # default display mode, and gamescope active only when it already had a
+        # render resolution.
+        9,
+        (
+            "ALTER TABLE games ADD COLUMN show_in_library "
+            "INTEGER NOT NULL DEFAULT 1 "
+            "CHECK (show_in_library IN (0, 1))",
+            "ALTER TABLE games ADD COLUMN display_mode "
+            "TEXT NOT NULL DEFAULT 'default' "
+            "CHECK (display_mode IN ('default', 'fullscreen', 'windowed', "
+            "'borderless', 'virtual_desktop'))",
+            "ALTER TABLE games ADD COLUMN virtual_desktop_resolution "
+            "TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE games ADD COLUMN gamescope_enabled "
+            "INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (gamescope_enabled IN (0, 1))",
+            "ALTER TABLE games ADD COLUMN gamescope_output_resolution "
+            "TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE games ADD COLUMN gamescope_fps_limit "
+            "INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE games ADD COLUMN gamescope_vsync "
+            "TEXT NOT NULL DEFAULT '' "
+            "CHECK (gamescope_vsync IN ('', 'on', 'off'))",
+            "ALTER TABLE games ADD COLUMN gamescope_filter "
+            "TEXT NOT NULL DEFAULT '' "
+            "CHECK (gamescope_filter IN ('', 'fsr', 'nis', 'linear', "
+            "'nearest'))",
+            "ALTER TABLE games ADD COLUMN gamescope_fullscreen "
+            "INTEGER NOT NULL DEFAULT 1 "
+            "CHECK (gamescope_fullscreen IN (0, 1))",
+        ),
+    ),
 )
 
 
@@ -198,8 +257,8 @@ class Database:
         self._connection = sqlite3.connect(self.path)
         try:
             self._connection.row_factory = sqlite3.Row
-            self._connection.execute("PRAGMA journal_mode = WAL")
             self._connection.execute("PRAGMA busy_timeout = 5000")
+            _enable_wal(self._connection)
             self._migrate()
         except BaseException:
             self._connection.close()
@@ -244,6 +303,14 @@ class Database:
             connection.commit()
         connection.execute("BEGIN IMMEDIATE")
         try:
+            # BEGIN IMMEDIATE serializes writers, but the version was read
+            # before the lock was taken. Another process may have completed this
+            # same migration in between, so re-check under the lock and skip it
+            # rather than re-running non-idempotent ALTER statements.
+            current = connection.execute("PRAGMA user_version").fetchone()[0]
+            if current >= version:
+                connection.rollback()
+                return
             for statement in statements:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {version}")
@@ -276,6 +343,15 @@ class Database:
             installer_source_owned=bool(row["installer_source_owned"]),
             wine_prefix_shared=bool(row["wine_prefix_shared"]),
             gamescope_resolution=row["gamescope_resolution"],
+            gamescope_enabled=bool(row["gamescope_enabled"]),
+            gamescope_output_resolution=row["gamescope_output_resolution"],
+            gamescope_fps_limit=row["gamescope_fps_limit"],
+            gamescope_vsync=row["gamescope_vsync"],
+            gamescope_filter=row["gamescope_filter"],
+            gamescope_fullscreen=bool(row["gamescope_fullscreen"]),
+            display_mode=DisplayMode(row["display_mode"]),
+            virtual_desktop_resolution=row["virtual_desktop_resolution"],
+            show_in_library=bool(row["show_in_library"]),
         )
 
     @staticmethod
@@ -376,8 +452,12 @@ class Database:
                     install_directory, install_directory_owned,
                     installer_source_directory, installer_source_owned,
                     wine_prefix_shared, gamescope_resolution,
+                    gamescope_enabled, gamescope_output_resolution,
+                    gamescope_fps_limit, gamescope_vsync, gamescope_filter,
+                    gamescope_fullscreen, display_mode,
+                    virtual_desktop_resolution, show_in_library,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     game.id,
@@ -397,6 +477,15 @@ class Database:
                     int(game.installer_source_owned),
                     int(game.wine_prefix_shared),
                     game.gamescope_resolution,
+                    int(game.gamescope_enabled),
+                    game.gamescope_output_resolution,
+                    game.gamescope_fps_limit,
+                    game.gamescope_vsync,
+                    game.gamescope_filter,
+                    int(game.gamescope_fullscreen),
+                    game.display_mode.value,
+                    game.virtual_desktop_resolution,
+                    int(game.show_in_library),
                     game.created_at,
                     game.updated_at,
                 ),
@@ -424,6 +513,15 @@ class Database:
                     installer_source_owned = ?,
                     wine_prefix_shared = ?,
                     gamescope_resolution = ?,
+                    gamescope_enabled = ?,
+                    gamescope_output_resolution = ?,
+                    gamescope_fps_limit = ?,
+                    gamescope_vsync = ?,
+                    gamescope_filter = ?,
+                    gamescope_fullscreen = ?,
+                    display_mode = ?,
+                    virtual_desktop_resolution = ?,
+                    show_in_library = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -444,6 +542,15 @@ class Database:
                     int(game.installer_source_owned),
                     int(game.wine_prefix_shared),
                     game.gamescope_resolution,
+                    int(game.gamescope_enabled),
+                    game.gamescope_output_resolution,
+                    game.gamescope_fps_limit,
+                    game.gamescope_vsync,
+                    game.gamescope_filter,
+                    int(game.gamescope_fullscreen),
+                    game.display_mode.value,
+                    game.virtual_desktop_resolution,
+                    int(game.show_in_library),
                     game.updated_at,
                     game.id,
                 ),
@@ -458,6 +565,18 @@ class Database:
             cursor = self._connection.execute(
                 "UPDATE games SET cover_path = ?, updated_at = ? WHERE id = ?",
                 (cover_path, updated_at, game_id),
+            )
+        return cursor.rowcount > 0
+
+    def update_visibility(
+        self, game_id: str, show_in_library: bool, updated_at: str
+    ) -> bool:
+        """Update only the library-visibility flag."""
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE games SET show_in_library = ?, updated_at = ? "
+                "WHERE id = ?",
+                (int(show_in_library), updated_at, game_id),
             )
         return cursor.rowcount > 0
 
@@ -509,6 +628,26 @@ def _decode_environment(raw: str | None) -> dict[str, str]:
         for key, value in decoded.items()
         if isinstance(key, str) and isinstance(value, str)
     }
+
+
+def _enable_wal(connection: sqlite3.Connection) -> None:
+    """Switch the connection to WAL, retrying a transient concurrent-open lock.
+
+    SQLite does not run the busy handler for a journal-mode change, so two
+    processes opening the same fresh library can race and one gets
+    ``database is locked`` immediately even with ``busy_timeout`` set. The lock
+    only lasts as long as the other opener's switch, so a short bounded retry
+    is enough.
+    """
+    deadline = time.monotonic() + _WAL_RETRY_SECONDS
+    while True:
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() or time.monotonic() >= deadline:
+                raise
+            time.sleep(_WAL_RETRY_DELAY)
 
 
 def _lacks_sqlite_header(path: Path) -> bool:

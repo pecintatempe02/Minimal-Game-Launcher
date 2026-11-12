@@ -23,7 +23,12 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
 
 from minimal_game_launcher.errors import LauncherError  # noqa: E402
-from minimal_game_launcher.models import Game, GameDraft, Platform  # noqa: E402
+from minimal_game_launcher.models import (  # noqa: E402
+    DisplayMode,
+    Game,
+    GameDraft,
+    Platform,
+)
 from minimal_game_launcher.paths import covers_directory  # noqa: E402
 from minimal_game_launcher.services.cover_manager import CoverManager  # noqa: E402
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
@@ -43,6 +48,9 @@ _IMAGE_PATTERNS = (
     "*.webp",
     "*.WEBP",
 )
+_DISPLAY_MODES = tuple(DisplayMode)
+_VSYNC_LABELS = ("Default", "On", "Off")
+_FILTER_LABELS = ("Default", "FSR", "NIS", "Linear", "Nearest")
 
 
 class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
@@ -84,6 +92,25 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
         self._gamemode_enabled = game.gamemode_enabled if game else True
         self._mangohud_enabled = game.mangohud_enabled if game else False
         self._gamescope_resolution = game.gamescope_resolution if game else ""
+        self._gamescope_enabled = (
+            game.gamescope_active if game else False
+        )
+        self._gamescope_output_resolution = (
+            game.gamescope_output_resolution if game else ""
+        )
+        self._gamescope_fps_limit = game.gamescope_fps_limit if game else 0
+        self._gamescope_vsync = game.gamescope_vsync if game else ""
+        self._gamescope_filter = game.gamescope_filter if game else ""
+        self._gamescope_fullscreen = (
+            game.gamescope_fullscreen if game else True
+        )
+        self._display_mode = (
+            game.display_mode if game else DisplayMode.DEFAULT
+        )
+        self._virtual_desktop_resolution = (
+            game.virtual_desktop_resolution if game else ""
+        )
+        self._show_in_library = game.show_in_library if game else True
 
         self.set_content_width(620)
         self.set_content_height(700)
@@ -133,6 +160,16 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
             self._platform_row, "notify::selected", self._on_platform_changed
         )
         game_group.add(self._platform_row)
+
+        self._visible_row = Adw.SwitchRow(
+            title="Show in library",
+            subtitle=(
+                "Hidden games keep all their data and remain reachable from "
+                "the hidden-games manager."
+            ),
+        )
+        self._visible_row.set_active(self._show_in_library)
+        game_group.add(self._visible_row)
 
         launch_group = Adw.PreferencesGroup(
             title="Launch configuration",
@@ -186,6 +223,41 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
             self._arguments_row.set_text(self._game.launch_arguments)
         launch_group.add(self._arguments_row)
 
+        display_group = Adw.PreferencesGroup(
+            title="Display",
+            description=(
+                "Fullscreen, windowed, and borderless are hints only: the game "
+                "decides. The Wine virtual desktop and gamescope are enforced "
+                "by the launcher. The host display mode is never changed."
+            ),
+        )
+        preferences.add(display_group)
+
+        self._display_mode_row = Adw.ComboRow(title="Display mode")
+        self._display_mode_row.set_model(
+            Gtk.StringList.new(
+                [mode.display_name for mode in _DISPLAY_MODES]
+            )
+        )
+        self._display_mode_row.set_selected(
+            _DISPLAY_MODES.index(self._display_mode)
+        )
+        self.connect_owned(
+            self._display_mode_row,
+            "notify::selected",
+            self._on_display_mode_changed,
+        )
+        display_group.add(self._display_mode_row)
+
+        self._virtual_desktop_row = Adw.EntryRow(
+            title="Virtual desktop resolution"
+        )
+        self._virtual_desktop_row.set_text(self._virtual_desktop_resolution)
+        self._virtual_desktop_row.set_tooltip_text(
+            "For example 1280x720. Used only with the Wine virtual desktop."
+        )
+        display_group.add(self._virtual_desktop_row)
+
         environment_group = Adw.PreferencesGroup(
             title="Environment variables",
             description=(
@@ -234,14 +306,75 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
         # gamescope renders the game at a fixed resolution and upscales it to
         # the display. This is what makes a game with an 800x600 back buffer
         # fill a modern monitor instead of a corner of it.
-        self._gamescope_row = Adw.EntryRow(title="Upscale resolution")
+        self._gamescope_enabled_row = Adw.SwitchRow(
+            title="gamescope",
+            subtitle=(
+                "Runs the game in gamescope. Required for the resolution and "
+                "upscaling options below."
+            ),
+        )
+        self._gamescope_enabled_row.set_active(self._gamescope_enabled)
+        self.connect_owned(
+            self._gamescope_enabled_row,
+            "notify::active",
+            self._on_gamescope_toggled,
+        )
+        performance_group.add(self._gamescope_enabled_row)
+
+        self._gamescope_row = Adw.EntryRow(title="Render resolution")
         self._gamescope_row.set_text(self._gamescope_resolution)
         self._gamescope_row.set_tooltip_text(
             "Optional, for example 800x600. gamescope renders the game at "
-            "this resolution and scales it to the display. Leave empty to "
-            "launch without gamescope."
+            "this resolution and scales it to the display."
         )
         performance_group.add(self._gamescope_row)
+
+        self._gamescope_output_row = Adw.EntryRow(
+            title="Output resolution"
+        )
+        self._gamescope_output_row.set_text(
+            self._gamescope_output_resolution
+        )
+        self._gamescope_output_row.set_tooltip_text(
+            "Optional, for example 1920x1080. Leave empty to use the display."
+        )
+        performance_group.add(self._gamescope_output_row)
+
+        self._gamescope_fps_row = Adw.SpinRow.new_with_range(
+            0, 1000, 1
+        )
+        self._gamescope_fps_row.set_title("FPS limit")
+        self._gamescope_fps_row.set_subtitle("0 leaves the frame rate unlimited")
+        self._gamescope_fps_row.set_value(self._gamescope_fps_limit)
+        performance_group.add(self._gamescope_fps_row)
+
+        self._gamescope_vsync_row = Adw.ComboRow(title="VSync")
+        self._gamescope_vsync_row.set_model(
+            Gtk.StringList.new(list(_VSYNC_LABELS))
+        )
+        self._gamescope_vsync_row.set_selected(
+            {"": 0, "on": 1, "off": 2}.get(self._gamescope_vsync, 0)
+        )
+        performance_group.add(self._gamescope_vsync_row)
+
+        self._gamescope_filter_row = Adw.ComboRow(title="Upscaler filter")
+        self._gamescope_filter_row.set_model(
+            Gtk.StringList.new(list(_FILTER_LABELS))
+        )
+        self._gamescope_filter_row.set_selected(
+            {"": 0, "fsr": 1, "nis": 2, "linear": 3, "nearest": 4}.get(
+                self._gamescope_filter, 0
+            )
+        )
+        performance_group.add(self._gamescope_filter_row)
+
+        self._gamescope_fullscreen_row = Adw.SwitchRow(
+            title="gamescope fullscreen"
+        )
+        self._gamescope_fullscreen_row.set_active(
+            self._gamescope_fullscreen
+        )
+        performance_group.add(self._gamescope_fullscreen_row)
 
         cover_group = Adw.PreferencesGroup(
             title="Cover",
@@ -284,6 +417,7 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
         self._refresh_executable_row()
         self._refresh_working_directory_row()
         self._refresh_performance_rows()
+        self._refresh_display_rows()
         self._refresh_cover_row()
 
     def _update_platform_labels(self) -> None:
@@ -344,14 +478,48 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
             )
 
         if not self._availability.gamescope_available:
-            self._gamescope_row.set_subtitle(
-                "gamescope was not found in PATH. An upscale resolution "
-                "cannot be applied."
+            self._gamescope_enabled_row.set_subtitle(
+                "gamescope was not found in PATH. Enabling it will prevent "
+                "this game from launching until gamescope is installed."
             )
         else:
-            self._gamescope_row.set_subtitle(
-                "gamescope found in PATH. Empty disables upscaling."
+            self._gamescope_enabled_row.set_subtitle(
+                "gamescope found in PATH. The host display mode is not changed."
             )
+        self._refresh_gamescope_rows()
+
+    def _refresh_display_rows(self) -> None:
+        self._virtual_desktop_row.set_visible(
+            self._display_mode is DisplayMode.VIRTUAL_DESKTOP
+        )
+        self._virtual_desktop_row.set_sensitive(
+            self._platform is Platform.WINDOWS
+        )
+
+    def _refresh_gamescope_rows(self) -> None:
+        enabled = self._gamescope_enabled_row.get_active()
+        for row in (
+            self._gamescope_row,
+            self._gamescope_output_row,
+            self._gamescope_fps_row,
+            self._gamescope_vsync_row,
+            self._gamescope_filter_row,
+            self._gamescope_fullscreen_row,
+        ):
+            row.set_sensitive(enabled)
+
+    def _on_gamescope_toggled(
+        self, _row: Adw.SwitchRow, _pspec: object
+    ) -> None:
+        self._refresh_gamescope_rows()
+
+    def _on_display_mode_changed(
+        self, _row: Adw.ComboRow, _pspec: object
+    ) -> None:
+        index = self._display_mode_row.get_selected()
+        if 0 <= index < len(_DISPLAY_MODES):
+            self._display_mode = _DISPLAY_MODES[index]
+        self._refresh_display_rows()
 
     def _refresh_cover_row(self) -> None:
         display_path = (
@@ -377,8 +545,17 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
     def _on_platform_changed(self, _row: Adw.ComboRow, _pspec: object) -> None:
         selected = self._platform_row.get_selected()
         self._platform = Platform.WINDOWS if selected == 1 else Platform.LINUX
+        if (
+            self._platform is Platform.LINUX
+            and self._display_mode is DisplayMode.VIRTUAL_DESKTOP
+        ):
+            self._display_mode = DisplayMode.DEFAULT
+            self._display_mode_row.set_selected(
+                _DISPLAY_MODES.index(self._display_mode)
+            )
         self._update_platform_labels()
         self._refresh_performance_rows()
+        self._refresh_display_rows()
 
     def _set_initial_folder(self, dialog: Gtk.FileDialog, path: str | None) -> None:
         if not path:
@@ -567,6 +744,25 @@ class GameEditorDialog(Adw.Dialog, DialogSignalOwner):
             gamemode_enabled=self._gamemode_row.get_active(),
             mangohud_enabled=self._mangohud_row.get_active(),
             gamescope_resolution=self._gamescope_row.get_text(),
+            gamescope_enabled=self._gamescope_enabled_row.get_active(),
+            gamescope_output_resolution=(
+                self._gamescope_output_row.get_text()
+            ),
+            gamescope_fps_limit=int(self._gamescope_fps_row.get_value()),
+            gamescope_vsync=("", "on", "off")[
+                max(0, self._gamescope_vsync_row.get_selected())
+            ],
+            gamescope_filter=("", "fsr", "nis", "linear", "nearest")[
+                max(0, self._gamescope_filter_row.get_selected())
+            ],
+            gamescope_fullscreen=(
+                self._gamescope_fullscreen_row.get_active()
+            ),
+            display_mode=self._display_mode,
+            virtual_desktop_resolution=(
+                self._virtual_desktop_row.get_text()
+            ),
+            show_in_library=self._visible_row.get_active(),
         )
         try:
             if self._game:

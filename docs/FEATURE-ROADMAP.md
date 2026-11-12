@@ -1,20 +1,12 @@
 # Minimal Game Launcher — Feature Roadmap & Architecture Specification
 
 **Status:** Durable specification for the phases after the 0.5.0 baseline.  
-**Last updated:** 2026-11-06  
-**Implementation state:** Steps 1 (command / external application
-launching), 2 (on-demand diagnostics), 3 (ownership and data-management
-foundation), 4 (ISO game installer), and 5 (cleanup UI / orphan detection) are
-implemented on the existing application architecture. Feature E provides
-metadata-only removal as the default, explicit managed-data deletion,
-on-demand orphan inspection, and no automatic cleanup. Step 7 fixes production
-mounting of hybrid ISO9660 + Apple Partition Map images. Step 8 adds read-only
-post-installation executable discovery and stops creating an unused managed
-game directory for Wine-prefix installs. Step 9 adds pending-install removal
-with confirmation and a result popup. Step 10 adds standalone `.exe` installers
-and an opt-in user desktop launcher entry. Steps 1–10 and the memory-management
-follow-up are committed at HEAD `6be4122`; v0.5.0 release preparation is in
-progress.
+**Last updated:** 2026-11-07
+**Implementation state:** Steps 1–12 are implemented on the existing
+application architecture. Steps 1–11 are committed at HEAD `072ee85`. Step 12
+adds the v0.6.0 feature set: per-game library visibility, Wine runtime
+diagnostics, per-game Winecfg and Winetricks, full display/gamescope controls,
+and a first-run setup wizard.
 
 This document records requirements and proposed architecture. Recommendations
 are explicitly marked **Proposed — not accepted**. Open decisions are collected
@@ -31,12 +23,14 @@ not yet marked accepted.
 
 ### 1.1 Verified baseline
 
-- Application version: `0.5.0`
-- HEAD: `6be4122` (`updating .gitignore`)
-- Library schema: v7, `games` plus `installer_sessions` (Step 1 added
-  `environment`; Step 3 added install/source paths and non-owned-by-default
-  ownership flags; Step 4 added installer sessions; v7 adds
-  `installer_sessions.source_kind`)
+- Application version: `0.5.0` (v0.6.0 feature work is implemented but the
+  version is bumped only during release preparation)
+- HEAD: `072ee85` (`Preparing for Releases`)
+- Library schema: v9 in the working tree, `games` plus `installer_sessions`
+  (v8 at HEAD adds `games.gamescope_resolution`; v9 adds visibility, display
+  mode, virtual desktop, and full gamescope controls. Earlier steps added
+  `environment`, install/source paths, ownership flags, installer sessions, and
+  `installer_sessions.source_kind`.)
 - Existing launch paths: Linux native/command and Windows through per-game Wine
   prefixes
 - Existing removal behavior: metadata-only by default; Step 5 adds explicit
@@ -958,3 +952,54 @@ Stabilization only; no feature was added. Completed, uncommitted.
 - Settings persist `desktop_entry_enabled` as `None`/`True`/`False`; `None`
   performs no startup filesystem changes. Saving rolls back desktop changes if
   settings persistence fails.
+
+---
+
+## 16. Step 12 — v0.6.0 feature set record
+
+**Status:** implemented and uncommitted, 2026-11-07.
+
+- **Library visibility** is per game. `games.show_in_library` defaults to `1`.
+  `GameManager.list_games()` filters hidden rows by default; `include_hidden`
+  is used by management paths, so cleanup and orphan detection still see every
+  record. `list_hidden_games()` and `set_library_visibility()` back the hidden
+  games dialog. Nothing is deleted.
+- **Wine runtime diagnostics** capture only Windows launch output. A daemon
+  reader drains the pipe into a 64 KiB buffer so a full pipe cannot block the
+  game; the launcher writes `<state>/launch-logs/<game-id>.log` with an
+  `exit_status=` header after exit. `services/wine_output.py` recognizes 12
+  signatures (permissions, missing executable/library, prefix, DLL, MSVC,
+  .NET, Direct3D, DXGI, DXVK, VKD3D, Vulkan, crash) plus a non-zero exit
+  finding. Diagnostics adds a "Last launch output" section.
+- **Per-game Winecfg and Winetricks** are explicit on-demand actions.
+  `services/wine_tools.py` verifies the prefix through `OwnershipService`,
+  refuses external and uninitialized prefixes, validates Winetricks verbs
+  against a bounded name pattern, uses argv lists with `shell=False`, and
+  detaches with `start_new_session=True`. Output is appended to
+  `<state>/wine-tools/<game-id>.log`; the launcher does not wait. Missing
+  tools disable only the matching action; nothing is installed automatically.
+- **Display configuration** stores `display_mode` (`default`, `fullscreen`,
+  `windowed`, `borderless`, `virtual_desktop`). Virtual desktop is
+  Windows-only, requires a `WxH`, and launches through
+  `wine explorer /desktop=MGL-<id8>,WxH <exe> ...`; the host resolution is
+  never changed. Other modes are recorded hints that MGL cannot enforce for
+  every game.
+- **gamescope** stores an explicit enable flag, render and output resolutions,
+  FPS limit, vsync, filter, and fullscreen. The argv order is render size,
+  output size, fullscreen, FPS limit, vsync, filter, then `--` and the wrapped
+  command. An explicit request is a launch requirement: a missing binary raises
+  `LaunchError` rather than silently changing the display mode.
+- **First-run wizard** is informational and preference-only. It performs one
+  `PATH` lookup per optional tool when its page is shown, records the prefix
+  strategy and desktop-entry preference, and persists
+  `settings.json:setup_completed`. Skipping also marks it complete. It starts
+  no service and creates no prefix.
+- **Idle resources:** no new daemon, timer, polling loop, startup scan, or
+  automatic dependency install. All new work is triggered by a user action.
+- **Verification:** 645 passed, 52 warnings in 62.48 s; real GTK startup under
+  `dbus-run-session` with isolated `XDG_*` directories; no real Wine,
+  Winetricks, gamescope, or installer process was run.
+- **Known limitations:** gamescope and display modes other than the Wine
+  virtual desktop depend on the game/driver; Winetricks requires network
+  access and can take minutes; captured output is bounded and may omit the
+  root cause after the first 64 KiB.

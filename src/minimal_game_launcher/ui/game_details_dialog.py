@@ -25,6 +25,7 @@ class GameDetailsDialog(Adw.Dialog, DialogSignalOwner):
     __gsignals__ = {
         "launch-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "diagnostics-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
+        "wine-tools-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "cover-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "edit-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "remove-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
@@ -69,6 +70,16 @@ class GameDetailsDialog(Adw.Dialog, DialogSignalOwner):
         diagnose.set_tooltip_text("Run read-only diagnostics for this game")
         self.connect_owned(diagnose, "clicked", self._on_diagnostics_clicked)
         header.pack_end(diagnose)
+
+        if self._game.platform is Platform.WINDOWS:
+            wine_tools = Gtk.Button(label="Wine tools")
+            wine_tools.set_tooltip_text(
+                "Open Winecfg or run Winetricks for this game"
+            )
+            self.connect_owned(
+                wine_tools, "clicked", self._on_wine_tools_clicked
+            )
+            header.pack_end(wine_tools)
 
         launch = Gtk.Button(label="Launch")
         launch.add_css_class("suggested-action")
@@ -158,6 +169,10 @@ class GameDetailsDialog(Adw.Dialog, DialogSignalOwner):
 
     def _on_diagnostics_clicked(self, _button: Gtk.Button) -> None:
         self.emit("diagnostics-requested", self._game)
+        self.close()
+
+    def _on_wine_tools_clicked(self, _button: Gtk.Button) -> None:
+        self.emit("wine-tools-requested", self._game)
         self.close()
 
     def _on_remove_clicked(self, _button: Gtk.Button) -> None:

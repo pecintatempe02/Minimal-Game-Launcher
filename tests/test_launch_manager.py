@@ -7,6 +7,7 @@ main loop.
 
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 from dataclasses import replace
@@ -24,7 +25,12 @@ from minimal_game_launcher.errors import (  # noqa: E402
     PrefixInitializationError,
     WineNotFoundError,
 )
-from minimal_game_launcher.models import Game, GameDraft, Platform  # noqa: E402
+from minimal_game_launcher.models import (  # noqa: E402
+    DisplayMode,
+    Game,
+    GameDraft,
+    Platform,
+)
 from minimal_game_launcher.services.game_manager import GameManager  # noqa: E402
 from minimal_game_launcher.services.launch_manager import (  # noqa: E402
     PREFIX_READY_MARKER,
@@ -864,3 +870,152 @@ def test_shutdown_leaves_running_games_untouched(
 
     assert process.signals == []
     assert launcher.is_running(game.id) is False
+
+
+def test_virtual_desktop_wraps_the_game_in_wine_explorer(
+    manager: GameManager, tmp_path: Path, fake_wine: Path
+) -> None:
+    """A virtual desktop is enforced through ``wine explorer /desktop``."""
+    game = _windows_game(manager, tmp_path)
+    executable = game.executable
+    game = manager.update_game(
+        game.id,
+        GameDraft(
+            name=game.name,
+            platform=Platform.WINDOWS,
+            executable=executable,
+            display_mode=DisplayMode.VIRTUAL_DESKTOP,
+            virtual_desktop_resolution="1280x720",
+        ),
+    )
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        _custom_wine_store(tmp_path, fake_wine),
+        run_factory=FakeRunner(),
+        which=_no_optional_tools,
+    )
+
+    spec = launcher.prepare_launch(game)
+
+    assert spec.command == (
+        str(fake_wine),
+        "explorer",
+        f"/desktop=MGL-{game.id[:8]},1280x720",
+        executable,
+    )
+
+
+def test_virtual_desktop_name_sanitizes_the_game_id(
+    manager: GameManager, tmp_path: Path, fake_wine: Path
+) -> None:
+    """A hostile stored ID cannot inject characters into the desktop name."""
+    game = _windows_game(manager, tmp_path)
+    hostile = replace(
+        game,
+        id="bad,id /with spaces-and:colons",
+        display_mode=DisplayMode.VIRTUAL_DESKTOP,
+        virtual_desktop_resolution="1280x720",
+    )
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        _custom_wine_store(tmp_path, fake_wine),
+        run_factory=FakeRunner(),
+        which=_no_optional_tools,
+    )
+
+    spec = launcher.prepare_launch(hostile)
+
+    assert spec.command[2] == "/desktop=MGL-badidwit,1280x720"
+    assert "," not in spec.command[2].split(",", 1)[0]
+    assert " " not in spec.command[2]
+
+
+def test_virtual_desktop_and_gamescope_compose_in_wrapper_order(
+    manager: GameManager, tmp_path: Path, fake_wine: Path
+) -> None:
+    """gamescope stays outermost and the virtual desktop stays inside Wine."""
+    game = _windows_game(manager, tmp_path)
+    executable = game.executable
+    game = manager.update_game(
+        game.id,
+        GameDraft(
+            name=game.name,
+            platform=Platform.WINDOWS,
+            executable=executable,
+            gamemode_enabled=True,
+            gamescope_enabled=True,
+            gamescope_resolution="800x600",
+            display_mode=DisplayMode.VIRTUAL_DESKTOP,
+            virtual_desktop_resolution="1280x720",
+        ),
+    )
+
+    def which(name: str) -> str | None:
+        return {
+            "gamemoderun": "/usr/bin/gamemoderun",
+            "gamescope": "/usr/bin/gamescope",
+        }.get(name)
+
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        _custom_wine_store(tmp_path, fake_wine),
+        run_factory=FakeRunner(),
+        which=which,
+    )
+
+    spec = launcher.prepare_launch(game)
+
+    assert spec.command == (
+        "/usr/bin/gamescope",
+        "-w",
+        "800",
+        "-h",
+        "600",
+        "-f",
+        "--",
+        "/usr/bin/gamemoderun",
+        str(fake_wine),
+        "explorer",
+        f"/desktop=MGL-{game.id[:8]},1280x720",
+        executable,
+    )
+
+
+def test_wine_launch_captures_bounded_output_and_writes_a_log(
+    manager: GameManager, tmp_path: Path, fake_wine: Path
+) -> None:
+    """Windows games pipe output to a reader and persist a bounded log."""
+    game = _windows_game(manager, tmp_path)
+    process = FakeProcess(polls_before_exit=1, returncode=1)
+    process.stdout = io.BytesIO(  # type: ignore[attr-defined]
+        b"err:module:import_dll Library MSVCP140.dll not found\n"
+    )
+    popen = FakePopen(process=process)
+    state = tmp_path / "state"
+    launcher = LaunchManager(
+        tmp_path / "prefixes",
+        _custom_wine_store(tmp_path, fake_wine),
+        run_factory=FakeRunner(),
+        popen_factory=popen,
+        pidfiles_root=state / "processes",
+        poll_interval_ms=10,
+        which=_no_optional_tools,
+    )
+    events: list[int] = []
+    launcher.connect(
+        "launch-finished",
+        lambda _manager, _game_id, code: events.append(code),
+    )
+
+    assert launcher.launch(game)
+    _run_main_loop_until(lambda: bool(events))
+    launcher.shutdown()
+
+    _command, kwargs = popen.calls[0]
+    assert kwargs["stdout"] == subprocess.PIPE
+    assert kwargs["stderr"] == subprocess.STDOUT
+    log = state / "launch-logs" / f"{game.id}.log"
+    assert log.read_text(encoding="utf-8") == (
+        "exit_status=1\n"
+        "err:module:import_dll Library MSVCP140.dll not found\n"
+    )

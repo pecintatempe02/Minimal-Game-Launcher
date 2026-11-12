@@ -24,8 +24,10 @@ still empty.
 
 ## Screens
 
-* **Library** — search, All/Native/Wine/Custom filters, responsive card grid,
-  play/stop, logs, edit, and remove.
+* **Library** — persistent sidebar (All/Native/Wine/Custom filters with counts and
+  Settings), search, responsive card grid, cover overlays for play/stop and a
+  per-game options menu (Edit Command, Logs, Remove game). Card bodies show only
+  title, genre (runner type), and state.
 * **Settings** — theme, sort order, transparency and solid fallback, opacity.
 * **Editor** — name, command (textarea), working directory, environment, notes,
   runner label, and cover picker with preview.

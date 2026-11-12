@@ -15,6 +15,7 @@ use crate::ui::text::Font;
 use crate::ui::theme::*;
 
 const BAR_H: f32 = 88.0;
+const SIDEBAR_W: f32 = 218.0;
 const STATUS_H: f32 = 26.0;
 const PAGE_PAD: f32 = 22.0;
 const GRID_GAP: f32 = 18.0;
@@ -25,9 +26,17 @@ const SHEET_FOOT: f32 = 66.0;
 
 /// Draw one frame. The library stays behind a modal scrim for depth.
 pub fn draw(ui: &mut Ui, state: &AppState) {
-    let background = ui.tk.bg;
-    ui.rect(ui.vp.full(), background, 0.0);
+    let background = if state.settings.transparent && !state.settings.solid_fallback {
+        ui.tk.bg.with_alpha(state.settings.alpha())
+    } else {
+        ui.tk.bg
+    };
+    let full_rect = ui.vp.full();
+    ui.rect(full_rect, background, 0.0);
     library(ui, state);
+    if state.modal.is_none() {
+        game_menu(ui, state);
+    }
     match &state.modal {
         Some(Modal::Settings) => settings(ui, state),
         Some(Modal::Editor(draft)) => editor(ui, state, draft),
@@ -42,32 +51,29 @@ pub fn draw(ui: &mut Ui, state: &AppState) {
 fn library(ui: &mut Ui, state: &AppState) {
     let tk = ui.tk;
     let vp = ui.vp;
-    let bar = Rect::new(0.0, 0.0, vp.width, BAR_H);
+    let status_h = if state.status.is_some() {
+        STATUS_H
+    } else {
+        0.0
+    };
+
+    // The sidebar is always present. It carries the filters and settings, so
+    // the grid keeps a stable navigation target when the window is resized.
+    let rail = Rect::new(0.0, 0.0, SIDEBAR_W, (vp.height - status_h).max(1.0));
+    sidebar(ui, state, rail);
+
+    let main_x = SIDEBAR_W;
+    let main_w = (vp.width - main_x).max(1.0);
+    let bar = Rect::new(main_x, 0.0, main_w, BAR_H);
     ui.rect(bar, tk.surface, 0.0);
+    ui.rect(Rect::new(main_x, BAR_H - 1.0, main_w, 1.0), tk.line, 0.0);
 
-    ui.text(
-        "MGL",
-        Rect::new(PAGE_PAD, 10.0, 200.0, 30.0),
-        Font::HEAD,
-        24.0,
-        tk.text,
-    );
-    ui.text(
-        "minimal game launcher",
-        Rect::new(PAGE_PAD, 36.0, 260.0, 16.0),
-        Font::BODY,
-        TEXT_SM,
-        tk.muted,
-    );
-
-    // Right side: search, add, settings.
-    let search_w = 220.0f32.min((vp.width * 0.32).max(140.0));
-    let settings_w = ICON_H;
+    // Top bar: search and add game.
     let add_w = ui.button_width("Add game");
     let gap = 10.0;
-    let settings_x = vp.width - PAGE_PAD - settings_w;
-    let add_x = settings_x - gap - add_w;
-    let search_x = (add_x - gap - search_w).max(PAGE_PAD + 100.0);
+    let search_w = 220.0f32.min((main_w * 0.4).max(140.0));
+    let add_x = vp.width - PAGE_PAD - add_w;
+    let search_x = (add_x - gap - search_w).max(main_x + PAGE_PAD);
     ui.input(
         Field::Query,
         Rect::new(search_x, 18.0, (add_x - gap - search_x).max(80.0), ICON_H),
@@ -81,47 +87,127 @@ fn library(ui: &mut Ui, state: &AppState) {
         Action::AddGame,
         true,
     );
-    ui.icon_button(
-        Rect::new(settings_x, 18.0, settings_w, ICON_H),
-        Icon::Gear,
-        false,
-        Action::OpenSettings,
+
+    let indices = state.visible();
+    let g = grid(vp, state.status.is_some(), indices.len());
+    if indices.is_empty() {
+        empty_state(ui, state, g.area);
+    } else {
+        cards(ui, state, &g, &indices);
+    }
+    status_bar(ui, state);
+}
+
+/// Library grid geometry, shared by drawing and keyboard scrolling so a selected
+/// card can be revealed without duplicating the metrics.
+#[derive(Clone, Copy, Debug)]
+pub struct Grid {
+    pub area: Rect,
+    pub columns: usize,
+    pub card_w: f32,
+    pub card_h: f32,
+    pub max: f32,
+}
+
+pub fn grid(vp: Viewport, status: bool, count: usize) -> Grid {
+    let status_h = if status { STATUS_H } else { 0.0 };
+    let area = Rect::new(
+        SIDEBAR_W + PAGE_PAD,
+        BAR_H + 16.0,
+        (vp.width - SIDEBAR_W - PAGE_PAD * 2.0).max(1.0),
+        (vp.height - BAR_H - 16.0 - 16.0 - status_h).max(1.0),
+    );
+    let (columns, card_w) = grid_columns(area.w, GRID_MIN, GRID_GAP);
+    let card_h = card_w + 90.0;
+    let rows = count.div_ceil(columns);
+    let total = rows as f32 * card_h + rows.saturating_sub(1) as f32 * GRID_GAP;
+    Grid {
+        area,
+        columns,
+        card_w,
+        card_h,
+        max: (total - area.h).max(0.0),
+    }
+}
+
+/// Scroll the grid so the card at `position` is fully visible.
+pub fn reveal(grid: &Grid, scroll: &mut f32, position: usize) {
+    let top = (position / grid.columns) as f32 * (grid.card_h + GRID_GAP);
+    if top < *scroll {
+        *scroll = top;
+    } else if top + grid.card_h > *scroll + grid.area.h {
+        *scroll = top + grid.card_h - grid.area.h;
+    }
+    *scroll = (*scroll).clamp(0.0, grid.max);
+}
+
+fn sidebar(ui: &mut Ui, state: &AppState, rect: Rect) {
+    let tk = ui.tk;
+    ui.rect(rect, tk.surface, 0.0);
+    ui.rect(
+        Rect::new(rect.right() - 1.0, rect.y, 1.0, rect.h),
+        tk.line,
+        0.0,
     );
 
-    // Filter chips.
+    // Collapse toggle, drawn as an icon button in the header.
+    let toggle = Rect::new(rect.x + 12.0, 14.0, 30.0, 30.0);
+    ui.icon_button(
+        toggle,
+        Icon::Menu,
+        state.settings.sidebar_collapsed,
+        Action::ToggleSidebar,
+    );
+
+    ui.text(
+        "MGL",
+        Rect::new(rect.x + 52.0, 18.0, rect.w - 64.0, 30.0),
+        Font::HEAD,
+        24.0,
+        tk.text,
+    );
+    ui.text(
+        "minimal game launcher",
+        Rect::new(rect.x + 52.0, 46.0, rect.w - 64.0, 16.0),
+        Font::BODY,
+        TEXT_SM,
+        tk.muted,
+    );
+    ui.text(
+        "LIBRARY",
+        Rect::new(rect.x + 52.0, 92.0, rect.w - 64.0, 16.0),
+        Font::BODY,
+        TEXT_LABEL,
+        tk.muted,
+    );
+
     let (all, native, wine, custom) = state.counts();
     let counts = [all, native, wine, custom];
-    let mut x = PAGE_PAD;
+    let mut y = 116.0;
     for (index, filter) in Filter::ALL.into_iter().enumerate() {
-        let label = format!("{} {}", filter.label(), counts[index]);
-        let width = ui.chip_width(&label);
-        ui.chip(
-            Rect::new(x, 54.0, width, 26.0),
-            &label,
+        ui.nav_item(
+            Rect::new(rect.x + 12.0, y, rect.w - 24.0, 38.0),
+            filter.label(),
+            Some(counts[index]),
+            None,
             state.filter == filter,
             Action::Filter(filter),
         );
-        x += width + 6.0;
+        y += 40.0;
     }
 
-    let status_h = if state.status.is_some() {
-        STATUS_H
-    } else {
-        0.0
-    };
-    let content = Rect::new(
-        PAGE_PAD,
-        BAR_H + 16.0,
-        vp.width - PAGE_PAD * 2.0,
-        (vp.height - BAR_H - 16.0 - 16.0 - status_h).max(1.0),
+    let settings = Rect::new(rect.x + 12.0, rect.bottom() - 54.0, rect.w - 24.0, 40.0);
+    ui.nav_item(
+        settings,
+        "Settings",
+        None,
+        Some(Icon::Gear),
+        state
+            .modal
+            .as_ref()
+            .is_some_and(|modal| matches!(modal, Modal::Settings)),
+        Action::OpenSettings,
     );
-    let indices = state.visible();
-    if indices.is_empty() {
-        empty_state(ui, state, content);
-    } else {
-        cards(ui, state, content, &indices);
-    }
-    status_bar(ui, state);
 }
 
 fn empty_state(ui: &mut Ui, state: &AppState, area: Rect) {
@@ -151,23 +237,20 @@ fn empty_state(ui: &mut Ui, state: &AppState, area: Rect) {
     }
 }
 
-fn cards(ui: &mut Ui, state: &AppState, area: Rect, indices: &[usize]) {
-    let (columns, width) = grid_columns(area.w, GRID_MIN, GRID_GAP);
-    let card_h = width + 96.0;
-    let rows = indices.len().div_ceil(columns);
-    let total = rows as f32 * card_h + (rows.saturating_sub(1)) as f32 * GRID_GAP;
-    let max = (total - area.h).max(0.0);
-    ui.max.library = max;
-    let scroll = ui.scroll.library.clamp(0.0, max);
+fn cards(ui: &mut Ui, state: &AppState, grid: &Grid, indices: &[usize]) {
+    let area = grid.area;
+    let card_h = grid.card_h;
+    ui.max.library = grid.max;
+    let scroll = ui.scroll.library.clamp(0.0, grid.max);
     ui.scroll_regions.push((area, ScrollTarget::Library));
 
     ui.push_clip(area);
     for (position, index) in indices.iter().enumerate() {
-        let column = position % columns;
-        let row = position / columns;
-        let x = area.x + column as f32 * (width + GRID_GAP);
+        let column = position % grid.columns;
+        let row = position / grid.columns;
+        let x = area.x + column as f32 * (grid.card_w + GRID_GAP);
         let y = area.y + row as f32 * (card_h + GRID_GAP) - scroll;
-        let rect = Rect::new(x, y, width, card_h);
+        let rect = Rect::new(x, y, grid.card_w, card_h);
         if rect.bottom() < area.y || rect.y > area.bottom() {
             continue;
         }
@@ -180,15 +263,18 @@ fn card(ui: &mut Ui, state: &AppState, index: usize, rect: Rect) {
     let tk = ui.tk;
     let game = &state.games[index];
     let hovered = ui.hovered(rect);
+    let selected = state.selected.as_deref() == Some(game.id.as_str());
 
-    // Whole card opens the editor; overlays registered later win the click.
-    ui.hit(rect, Action::EditGame(game.id.clone()), true);
     ui.rect_border(
         rect,
         tk.surface,
         10.0,
-        1.0,
-        if hovered { tk.accent } else { tk.line },
+        if selected { 2.0 } else { 1.0 },
+        if selected || hovered {
+            tk.accent
+        } else {
+            tk.line
+        },
     );
 
     let cover = Rect::new(rect.x + 10.0, rect.y + 10.0, rect.w - 20.0, rect.w - 20.0);
@@ -198,37 +284,42 @@ fn card(ui: &mut Ui, state: &AppState, index: usize, rect: Rect) {
     } else {
         let (a, b) = tk.cover_gradient(game.hue);
         ui.gradient_diag(cover, a, b, 8.0);
-        let initial = game
-            .name
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().collect::<String>())
-            .unwrap_or_default();
-        ui.text(
-            &initial,
-            Rect::new(cover.x, cover.y, cover.w, cover.h),
-            Font::HEAD,
-            TEXT_MONOGRAM.min(cover.h * 0.45),
-            Rgba::rgb(255, 255, 255).with_alpha(0.85),
-        );
+        ui.rect(cover, Rgba::rgb(255, 255, 255).with_alpha(0.6), 0.0);
     }
     ui.pop_clip();
 
-    // Play/stop overlay on the cover.
-    let run = Rect::new(cover.right() - 44.0, cover.bottom() - 44.0, 34.0, 34.0);
     let running = game.is_running();
-    ui.button(
+
+    // Play/stop is a single round icon over the cover.
+    let run = Rect::new(cover.right() - 48.0, cover.bottom() - 48.0, 38.0, 38.0);
+    ui.round_icon_button(
         run,
-        if running { "Stop" } else { "Play" },
+        if running { Icon::Stop } else { Icon::Play },
         if running {
             ButtonKind::Danger
         } else {
             ButtonKind::Primary
         },
         Action::Run(game.id.clone()),
-        true,
     );
 
+    // Per-game options button, overlaid at the top-right of the cover.
+    let settings = Rect::new(cover.right() - 38.0, cover.y + 8.0, 30.0, 30.0);
+    let menu_open = state
+        .game_menu
+        .as_ref()
+        .is_some_and(|menu| menu.game == game.id);
+    ui.icon_button(
+        settings,
+        Icon::Gear,
+        menu_open,
+        Action::OpenGameMenu {
+            game: game.id.clone(),
+            anchor: settings,
+        },
+    );
+
+    // Card body: title, genre (runner type) and state, nothing else.
     let title_y = cover.bottom() + 12.0;
     ui.text(
         &game.name,
@@ -237,47 +328,37 @@ fn card(ui: &mut Ui, state: &AppState, index: usize, rect: Rect) {
         TEXT_H3,
         tk.text,
     );
-    let state_label = if running {
-        "running".to_string()
-    } else {
-        match &game.status {
-            crate::core::game::RunStatus::Finished { outcome } => actions::short(outcome, 28),
-            _ => "ready".to_string(),
+
+    let (state_label, badge) = match &game.status {
+        crate::core::game::RunStatus::Running { .. } => ("Running", BadgeKind::Generated),
+        crate::core::game::RunStatus::Finished { outcome } => {
+            if outcome == "exit status 0" {
+                ("Ready", BadgeKind::Default)
+            } else {
+                ("Stopped", BadgeKind::Custom)
+            }
         }
+        crate::core::game::RunStatus::Idle => ("Ready", BadgeKind::Default),
     };
+    let badge_w = ui.badge_width(state_label);
+    let second_y = title_y + 24.0;
     ui.text(
-        &format!("{} · {}", game.runner_label(), state_label),
-        Rect::new(rect.x + 12.0, title_y + 22.0, rect.w - 24.0, 16.0),
+        game.runner_label(),
+        Rect::new(
+            rect.x + 12.0,
+            second_y,
+            (rect.w - 24.0 - badge_w - 8.0).max(1.0),
+            BADGE_H.max(16.0),
+        ),
         Font::BODY,
         TEXT_SM,
-        if running { tk.ok } else { tk.muted },
+        tk.muted,
     );
-
-    let logs_w = ui.button_width("Logs");
-    ui.button(
-        Rect::new(
-            rect.right() - 12.0 - logs_w,
-            rect.bottom() - 42.0,
-            logs_w,
-            30.0,
-        ),
-        "Logs",
-        ButtonKind::Default,
-        Action::OpenLogs(game.id.clone()),
-        true,
-    );
-    let remove_w = ui.button_width("Remove");
-    ui.button(
-        Rect::new(
-            rect.right() - 12.0 - logs_w - 6.0 - remove_w,
-            rect.bottom() - 42.0,
-            remove_w,
-            30.0,
-        ),
-        "Remove",
-        ButtonKind::DangerText,
-        Action::OpenRemove(game.id.clone()),
-        true,
+    ui.badge(
+        rect.right() - 12.0 - badge_w,
+        second_y - 1.0,
+        state_label,
+        badge,
     );
 }
 
@@ -290,7 +371,12 @@ fn status_bar(ui: &mut Ui, state: &AppState) {
     ui.rect(rect, tk.surface, 0.0);
     ui.text(
         status,
-        Rect::new(PAGE_PAD, rect.y + 4.0, rect.w - PAGE_PAD * 2.0, 18.0),
+        Rect::new(
+            SIDEBAR_W + PAGE_PAD,
+            rect.y + 4.0,
+            rect.w - SIDEBAR_W - PAGE_PAD * 2.0,
+            18.0,
+        ),
         Font::BODY,
         TEXT_SM,
         if state.status_error {
@@ -299,6 +385,57 @@ fn status_bar(ui: &mut Ui, state: &AppState) {
             tk.muted
         },
     );
+}
+
+// -------------------------------------------------------------- game options
+
+/// Options popover anchored to a card's settings button.
+fn game_menu(ui: &mut Ui, state: &AppState) {
+    let Some(menu) = &state.game_menu else {
+        return;
+    };
+    if state.game(&menu.game).is_none() {
+        return;
+    }
+
+    // Clicking anywhere outside the panel closes it.
+    ui.hit(ui.vp.full(), Action::CloseGameMenu, true);
+
+    let width = 210.0;
+    let item_h = 38.0;
+    let pad = 6.0;
+    let height = item_h * 3.0 + pad * 2.0;
+    let rect = popover_rect(menu.anchor, ui.vp, width, height);
+    ui.rect_border(rect, ui.tk.surface2, 8.0, 1.0, ui.tk.line);
+    ui.hit(rect, Action::Consume, true);
+
+    let items = [
+        ("Edit Command", Action::EditGame(menu.game.clone()), false),
+        ("Logs", Action::OpenLogs(menu.game.clone()), false),
+        ("Remove game", Action::OpenRemove(menu.game.clone()), true),
+    ];
+    let mut y = rect.y + pad;
+    for (label, action, danger) in items {
+        ui.menu_item(
+            Rect::new(rect.x + pad, y, rect.w - pad * 2.0, item_h),
+            label,
+            danger,
+            action,
+        );
+        y += item_h;
+    }
+}
+
+/// Place a popover under its anchor, flipping above and then clamping when it
+/// would leave the window. Pure so the edges can be tested without a GPU.
+pub fn popover_rect(anchor: Rect, vp: Viewport, width: f32, height: f32) -> Rect {
+    let x = (anchor.right() - width).clamp(8.0, (vp.width - width - 8.0).max(8.0));
+    let mut y = anchor.bottom() + 6.0;
+    if y + height > vp.height - 8.0 {
+        y = anchor.y - height - 6.0;
+    }
+    let y = y.clamp(8.0, (vp.height - height - 8.0).max(8.0));
+    Rect::new(x, y, width, height)
 }
 
 // -------------------------------------------------------------------- sheets
@@ -677,6 +814,16 @@ fn settings(ui: &mut Ui, state: &AppState) {
         (state.settings.opacity.saturating_sub(30) as f32) / 70.0,
     );
 
+    let area = row.next(0.0);
+    let note = ui.note(
+        Rect::new(area.x, area.y, area.w, 0.0),
+        "Keyboard: arrows select a game, Enter runs it, E edits, Delete removes, \
+         Ctrl+L opens its logs, Ctrl+N adds a game, / searches, Tab moves between \
+         fields. Ctrl+A/C/X/V select all, copy, cut and paste in any field.",
+        NoteKind::Info,
+    );
+    row.skip(note);
+
     sheet_footer(
         ui,
         rect,
@@ -820,3 +967,33 @@ fn cover_key(state: &AppState, id: &str) -> String {
 /// Keeps the unused import honest when the viewport helper is not referenced.
 #[allow(dead_code)]
 fn _viewport_marker(_: Viewport) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popover_opens_below_its_button() {
+        let vp = Viewport::new(1200.0, 800.0, 1.0);
+        let anchor = Rect::new(700.0, 100.0, 30.0, 30.0);
+        let rect = popover_rect(anchor, vp, 210.0, 126.0);
+        assert!((rect.right() - anchor.right()).abs() < 0.01);
+        assert!((rect.y - (anchor.bottom() + 6.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn popover_flips_and_clamps_at_the_window_edges() {
+        let vp = Viewport::new(720.0, 480.0, 1.0);
+        // Near the bottom: it must move above the anchor and stay inside.
+        let anchor = Rect::new(20.0, 440.0, 30.0, 30.0);
+        let rect = popover_rect(anchor, vp, 210.0, 126.0);
+        assert!(rect.bottom() <= anchor.y);
+        assert!(rect.y >= 8.0);
+
+        // Near the left edge: it must not spill over the sidebar.
+        let anchor = Rect::new(0.0, 100.0, 30.0, 30.0);
+        let rect = popover_rect(anchor, vp, 210.0, 126.0);
+        assert!(rect.x >= 8.0);
+        assert!(rect.right() <= vp.width - 8.0);
+    }
+}

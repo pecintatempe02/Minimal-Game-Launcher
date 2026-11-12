@@ -22,7 +22,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 use mgl::app::actions;
 use mgl::app::state::{AppState, Modal};
 use mgl::gfx::{self, Gfx};
-use mgl::ui::components::{Action, FieldRect, Hit, ScrollTarget, Scrolls, Ui};
+use mgl::ui::components::{Action, Field, FieldRect, Hit, ScrollTarget, Scrolls, Ui};
 use mgl::ui::layout::{Rect, Viewport};
 use mgl::ui::renderer::Renderer;
 use mgl::ui::screens;
@@ -141,6 +141,9 @@ impl App {
             state.scroll,
         );
         screens::draw(&mut ui, state);
+        // Select popups are drawn above every other widget, so they are the
+        // last thing added to the frame and the last hit region.
+        ui.end();
         let max = ui.max;
         self.hits = std::mem::take(&mut ui.hits);
         self.fields = std::mem::take(&mut ui.fields);
@@ -156,18 +159,18 @@ impl App {
 
     // ------------------------------------------------------------------ input
 
-    /// Which (hit, field) sits under the pointer. Hits win over fields because a
-    /// field is never covered by a widget it belongs to.
+    /// Which (hit, field) sits under the pointer. Fields win over sheet backdrops
+    /// and widgets, because a click on a text input must reach it.
     fn probe(&self) -> (Option<usize>, Option<usize>) {
         let (x, y) = self.pointer;
-        let hit = self.hits.iter().rposition(|hit| hit.rect.contains(x, y));
-        let field = match hit {
-            Some(_) => None,
-            None => self
-                .fields
-                .iter()
-                .rposition(|field| field.rect.contains(x, y)),
-        };
+        let field = self
+            .fields
+            .iter()
+            .rposition(|field| field.rect.contains(x, y));
+        let hit = self
+            .hits
+            .iter()
+            .rposition(|hit| hit.rect.contains(x, y) && !hit.action.is_consume());
         (hit, field)
     }
 
@@ -204,21 +207,7 @@ impl App {
 
     fn pointer_pressed(&mut self) {
         let (x, y) = self.pointer;
-        // 1. A widget. Disabled widgets still swallow the click so it cannot
-        //    reach the scrim behind them and close the sheet.
-        if let Some(index) = self.hits.iter().rposition(|hit| hit.rect.contains(x, y)) {
-            if !self.hits[index].enabled {
-                return;
-            }
-            let action = self.hits[index].action.clone();
-            // Clicking anywhere else commits the field's value first, so the
-            // follow-up action reads the text the user just typed.
-            actions::blur(&mut self.state);
-            actions::apply(&mut self.state, action);
-            self.request_redraw();
-            return;
-        }
-        // 2. A text input.
+        // 1. A text input takes priority over sheet backdrops and widgets.
         if let Some(field) = self
             .fields
             .iter()
@@ -235,9 +224,33 @@ impl App {
             self.request_redraw();
             return;
         }
+        // 2. A widget. Disabled widgets still swallow the click so it cannot
+        //    reach the scrim behind them and close the sheet. Invisible sheet
+        //    backdrops (`Consume`) are skipped so a click lands on the widget
+        //    drawn on top of them instead.
+        if let Some(index) = self
+            .hits
+            .iter()
+            .rposition(|hit| hit.rect.contains(x, y) && !hit.action.is_consume())
+        {
+            if !self.hits[index].enabled {
+                return;
+            }
+            let action = self.hits[index].action.clone();
+            // Clicking anywhere else commits the field's value first, so the
+            // follow-up action reads the text the user just typed.
+            actions::blur(&mut self.state);
+            actions::apply(&mut self.state, action);
+            self.request_redraw();
+            return;
+        }
         // 3. Empty space: drop focus and close any open menu.
-        if self.state.focus.is_some() || self.state.open_select.is_some() {
+        if self.state.focus.is_some()
+            || self.state.open_select.is_some()
+            || self.state.game_menu.is_some()
+        {
             self.state.open_select = None;
+            self.state.game_menu = None;
             actions::blur(&mut self.state);
             self.request_redraw();
         }
@@ -270,6 +283,89 @@ impl App {
         }
     }
 
+    /// Logical viewport, matching what `render` lays out against.
+    fn viewport(&self) -> Viewport {
+        let Some(window) = &self.window else {
+            return Viewport::new(1.0, 1.0, 1.0);
+        };
+        let size = window.inner_size();
+        let scale = self.scale.max(0.0001);
+        Viewport::new(size.width as f32 / scale, size.height as f32 / scale, scale)
+    }
+
+    /// Keep a keyboard-selected card inside the visible part of the grid.
+    fn reveal_selection(&mut self) {
+        let Some(position) = actions::selected_position(&self.state) else {
+            return;
+        };
+        let grid = screens::grid(
+            self.viewport(),
+            self.state.status.is_some(),
+            self.state.visible().len(),
+        );
+        screens::reveal(&grid, &mut self.state.scroll.library, position);
+    }
+
+    /// Move the library selection by grid cells and reveal it.
+    fn navigate(&mut self, dx: isize, dy: isize) {
+        let grid = screens::grid(
+            self.viewport(),
+            self.state.status.is_some(),
+            self.state.visible().len(),
+        );
+        actions::select_move(&mut self.state, grid.columns, dx, dy);
+        self.reveal_selection();
+    }
+
+    fn select_edge(&mut self, last: bool) {
+        actions::select_edge(&mut self.state, last);
+        self.reveal_selection();
+    }
+
+    /// Move focus to the next (or previous) text field. The order is the order
+    /// the last frame drew the fields in; running off either end drops focus so
+    /// the arrow keys go back to the library.
+    fn cycle_field(&mut self, backwards: bool) {
+        let sheet = self.state.modal.is_some();
+        let mut order: Vec<Field> = Vec::new();
+        for field in self.fields.iter().map(|field| field.field) {
+            // The library is still drawn behind a sheet, but its search box is
+            // not reachable while the sheet owns the keyboard.
+            if sheet && field == Field::Query {
+                continue;
+            }
+            if !order.contains(&field) {
+                order.push(field);
+            }
+        }
+        if order.is_empty() {
+            return;
+        }
+        let next = match (
+            self.state
+                .focus
+                .and_then(|focus| order.iter().position(|field| *field == focus)),
+            backwards,
+        ) {
+            (None, false) => Some(0),
+            (None, true) => Some(order.len() - 1),
+            (Some(index), false) => Some(index + 1),
+            (Some(0), true) => None,
+            (Some(index), true) => Some(index - 1),
+        };
+        match next.and_then(|index| order.get(index).copied()) {
+            Some(field) => self.focus_field(field),
+            None => actions::blur(&mut self.state),
+        }
+    }
+
+    fn focus_field(&mut self, field: Field) {
+        self.state.focus = Some(field);
+        self.state.open_select = None;
+        self.state.sel_anchor = None;
+        self.state.caret = actions::text_len(&self.state);
+    }
+
     /// Handle a key press. Returns `true` when the frame changed.
     fn key(&mut self, event: &KeyEvent) -> bool {
         let editing = self.state.focus.is_some();
@@ -279,27 +375,56 @@ impl App {
             let PhysicalKey::Code(code) = event.physical_key else {
                 return false;
             };
+            let logs = matches!(self.state.modal, Some(Modal::Logs(_)));
+            let editor = matches!(self.state.modal, Some(Modal::Editor(_)));
             match code {
                 KeyCode::KeyA => actions::select_all(&mut self.state),
+                // The log body is not selectable, so Ctrl+C copies the entry.
+                KeyCode::KeyC if logs && !editing => {
+                    actions::apply(&mut self.state, Action::CopyLog)
+                }
                 KeyCode::KeyC => {
                     actions::copy_selection(&mut self.state);
                 }
                 KeyCode::KeyX => actions::cut_selection(&mut self.state),
                 KeyCode::KeyV => actions::paste(&mut self.state),
+                KeyCode::KeyN if !editing && self.state.modal.is_none() => {
+                    actions::apply(&mut self.state, Action::AddGame)
+                }
+                KeyCode::KeyS if editor => actions::apply(&mut self.state, Action::SaveEditor),
+                KeyCode::KeyF if self.state.modal.is_none() => self.focus_field(Field::Query),
+                KeyCode::KeyL if !editing && self.state.modal.is_none() => {
+                    let id = actions::selected_game(&self.state).map(|game| game.id.clone());
+                    match id {
+                        Some(id) => actions::apply(&mut self.state, Action::OpenLogs(id)),
+                        None => return false,
+                    }
+                }
                 _ => return false,
             }
             return true;
         }
         let extend = self.modifiers.shift_key();
+        let library = self.state.modal.is_none();
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 if self.state.open_select.is_some() {
                     self.state.open_select = None;
+                } else if self.state.game_menu.is_some() {
+                    self.state.game_menu = None;
                 } else if self.state.modal.is_some() {
                     actions::apply(&mut self.state, Action::Close);
+                } else if self.state.focus.is_some() {
+                    actions::blur(&mut self.state);
+                } else if self.state.selected.is_some() {
+                    self.state.selected = None;
                 } else {
                     return false;
                 }
+                true
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.cycle_field(extend);
                 true
             }
             Key::Named(NamedKey::ArrowLeft) if editing => {
@@ -308,6 +433,29 @@ impl App {
             }
             Key::Named(NamedKey::ArrowRight) if editing => {
                 actions::move_caret(&mut self.state, 1, extend);
+                true
+            }
+            Key::Named(NamedKey::ArrowLeft) if library => {
+                self.navigate(-1, 0);
+                true
+            }
+            Key::Named(NamedKey::ArrowRight) if library => {
+                self.navigate(1, 0);
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) if library => {
+                self.navigate(0, -1);
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) if library => {
+                self.navigate(0, 1);
+                true
+            }
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)
+                if matches!(self.state.modal, Some(Modal::Logs(_))) =>
+            {
+                let up = matches!(event.logical_key, Key::Named(NamedKey::ArrowUp));
+                actions::step_log(&mut self.state, if up { -1 } else { 1 });
                 true
             }
             Key::Named(NamedKey::Home) if editing => {
@@ -319,6 +467,14 @@ impl App {
                 actions::move_caret_to(&mut self.state, end, extend);
                 true
             }
+            Key::Named(NamedKey::Home) if library => {
+                self.select_edge(false);
+                true
+            }
+            Key::Named(NamedKey::End) if library => {
+                self.select_edge(true);
+                true
+            }
             Key::Named(NamedKey::Backspace) if editing => {
                 actions::backspace(&mut self.state);
                 true
@@ -326,6 +482,15 @@ impl App {
             Key::Named(NamedKey::Delete) if editing => {
                 actions::delete_forward(&mut self.state);
                 true
+            }
+            Key::Named(NamedKey::Delete) if library => {
+                let id = actions::selected_game(&self.state).map(|game| game.id.clone());
+                if let Some(id) = id {
+                    actions::apply(&mut self.state, Action::OpenRemove(id));
+                    true
+                } else {
+                    false
+                }
             }
             Key::Named(NamedKey::Enter) if editing => {
                 let multiline = self
@@ -340,12 +505,14 @@ impl App {
                 }
                 true
             }
-            Key::Named(NamedKey::Tab) => {
-                if editing {
-                    actions::blur(&mut self.state);
-                    return true;
+            Key::Named(NamedKey::Enter) if library => {
+                let id = actions::selected_game(&self.state).map(|game| game.id.clone());
+                if let Some(id) = id {
+                    actions::apply(&mut self.state, Action::Run(id));
+                    true
+                } else {
+                    false
                 }
-                false
             }
             // Printable input. The logical key already reflects the layout and
             // every modifier except Ctrl, so capitals and composed characters
@@ -355,6 +522,23 @@ impl App {
                 if let Some(text) = actions::text_input(&event.logical_key, editing) {
                     actions::insert_text(&mut self.state, &text);
                     return true;
+                }
+                // Library keys: `/` jumps to search, `e` edits the selection.
+                if library && !self.modifiers.shift_key() {
+                    match actions::typed_text(&event.logical_key).as_deref() {
+                        Some("/") => {
+                            self.focus_field(Field::Query);
+                            return true;
+                        }
+                        Some("e") => {
+                            let id = actions::selected_game(&self.state).map(|g| g.id.clone());
+                            if let Some(id) = id {
+                                actions::apply(&mut self.state, Action::EditGame(id));
+                                return true;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 false
             }

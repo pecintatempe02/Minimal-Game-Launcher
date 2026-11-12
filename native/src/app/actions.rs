@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use crate::app::state::{AppState, EditorDraft, LogsView, Modal, RemoveView, search_path};
+use crate::app::state::{
+    AppState, EditorDraft, GameMenu, LogsView, Modal, RemoveView, search_path,
+};
 use crate::core::command;
 use crate::core::cover;
 use crate::core::game::{Game, RunnerLabel};
@@ -27,6 +29,10 @@ pub fn apply(state: &mut AppState, action: Action) {
     match action {
         // ---------------------------------------------------------- library
         Action::Filter(filter) => state.filter = filter,
+        Action::ToggleSidebar => {
+            state.settings.sidebar_collapsed = !state.settings.sidebar_collapsed;
+            state.persist_settings();
+        }
         Action::OpenSettings => open(state, Modal::Settings),
         Action::AddGame => {
             let id = library::allocate_id("new-game", &state.games);
@@ -79,6 +85,13 @@ pub fn apply(state: &mut AppState, action: Action) {
 
         // ------------------------------------------------------------- logs
         Action::OpenLogs(id) => open_logs(state, &id),
+        Action::OpenGameMenu { game, anchor } => {
+            state.game_menu = Some(GameMenu { game, anchor });
+            state.open_select = None;
+            state.focus = None;
+            state.sel_anchor = None;
+        }
+        Action::CloseGameMenu => state.game_menu = None,
         Action::PickLog(index) => {
             if let Some(Modal::Logs(view)) = &mut state.modal {
                 view.index = index;
@@ -105,10 +118,88 @@ pub fn apply(state: &mut AppState, action: Action) {
     }
 }
 
+// ------------------------------------------------------------------ selection
+//
+// Keyboard navigation over the library grid. The selection is stored by game id
+// so a filter change or a re-sort cannot point it at a different row.
+
+/// Position of the selected game inside the visible list.
+pub fn selected_position(state: &AppState) -> Option<usize> {
+    let id = state.selected.as_deref()?;
+    state
+        .visible()
+        .iter()
+        .position(|i| state.games[*i].id == id)
+}
+
+/// The selected game, if it is visible right now.
+pub fn selected_game(state: &AppState) -> Option<&Game> {
+    selected_position(state).map(|position| &state.games[state.visible()[position]])
+}
+
+/// Move the selection by `dx` cells inside its row and `dy` rows.
+pub fn select_move(state: &mut AppState, columns: usize, dx: isize, dy: isize) {
+    let visible = state.visible();
+    if visible.is_empty() {
+        state.selected = None;
+        return;
+    }
+    let len = visible.len();
+    let columns = columns.max(1);
+    let next = match selected_position(state) {
+        None => 0,
+        Some(position) => {
+            let target = position as isize;
+            let target = if dx != 0 {
+                let row_start = position - position % columns;
+                let row_end = (row_start + columns).min(len) - 1;
+                (target + dx).clamp(row_start as isize, row_end as isize)
+            } else if dy != 0 {
+                (target + dy * columns as isize).clamp(0, len as isize - 1)
+            } else {
+                target
+            };
+            target as usize
+        }
+    };
+    state.selected = Some(state.games[visible[next]].id.clone());
+}
+
+/// Select the first or last visible game (Home / End).
+pub fn select_edge(state: &mut AppState, last: bool) {
+    let visible = state.visible();
+    state.selected = visible
+        .last()
+        .filter(|_| last)
+        .or_else(|| visible.first())
+        .map(|index| state.games[*index].id.clone());
+}
+
+/// Step the log selection inside the logs sheet.
+pub fn step_log(state: &mut AppState, delta: isize) {
+    let Some(Modal::Logs(view)) = &state.modal else {
+        return;
+    };
+    let entries = view.records.len() + usize::from(state.launcher.is_active(&view.game));
+    if entries == 0 {
+        return;
+    }
+    apply(
+        state,
+        Action::PickLog(step_index(view.index, delta, entries)),
+    );
+}
+
+/// Wrap-free index step, clamped to `0..entries`. Pure, so it is tested.
+pub fn step_index(index: usize, delta: isize, entries: usize) -> usize {
+    (index as isize + delta).clamp(0, entries as isize - 1) as usize
+}
+
 // -------------------------------------------------------------------- helpers
 
 fn open(state: &mut AppState, modal: Modal) {
     state.modal = Some(modal);
+    state.game_menu = None;
     state.open_select = None;
     state.focus = None;
     state.sel_anchor = None;
@@ -376,7 +467,11 @@ fn confirm_remove(state: &mut AppState) {
     // covers directory is never touched.
     cover::remove_for_game(&id);
     state.covers.remove(&id);
+    if state.selected.as_deref() == Some(id.as_str()) {
+        state.selected = None;
+    }
     state.modal = None;
+    state.game_menu = None;
     state.focus = None;
     state.set_status(format!("Removed “{name}” from the library."));
 }

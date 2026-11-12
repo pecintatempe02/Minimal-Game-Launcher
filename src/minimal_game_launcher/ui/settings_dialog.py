@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import gi
@@ -34,7 +35,6 @@ from minimal_game_launcher.services.desktop_integration import (  # noqa: E402
     DesktopIntegrationService,
 )
 from minimal_game_launcher.settings import (  # noqa: E402
-    LauncherSettings,
     SettingsStore,
     WinePrefixStrategy,
     WineSource,
@@ -78,6 +78,7 @@ class SettingsDialog(Adw.Dialog, DialogSignalOwner):
         self._theme_controller = theme_controller
         self._desktop_integration = desktop_integration
         current = settings_store.load()
+        self._current = current
         self._wine_source = current.wine_source
         self._custom_wine_path = current.custom_wine_path
         self._prefix_strategy = current.wine_prefix_strategy
@@ -456,7 +457,10 @@ class SettingsDialog(Adw.Dialog, DialogSignalOwner):
                 )
                 return
 
-        settings = LauncherSettings(
+        # Preserve fields owned by other flows (the setup wizard's completion
+        # flag) instead of resetting them to their defaults on every save.
+        settings = replace(
+            self._current,
             wine_source=self._wine_source,
             custom_wine_path=custom_path,
             wine_prefix_strategy=self._prefix_strategy,

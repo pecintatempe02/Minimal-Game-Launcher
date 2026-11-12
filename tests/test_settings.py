@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from minimal_game_launcher.settings import SettingsStore
+from minimal_game_launcher.settings import LauncherSettings, SettingsStore
 
 
 def _store(tmp_path: Path) -> SettingsStore:
@@ -106,3 +106,19 @@ def test_custom_api_key_path_is_honored(tmp_path: Path) -> None:
 
     assert store.api_key_path == tmp_path / "secrets" / "key"
     assert store.load_api_key() == "custom"
+
+
+def test_setup_completed_round_trips(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    assert store.load().setup_completed is False
+    store.save(LauncherSettings(setup_completed=True))
+    assert store.load().setup_completed is True
+
+
+def test_invalid_setup_flag_falls_back_to_false(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.path.parent.mkdir(parents=True)
+    store.path.write_text('{"setup_completed": "yes"}', encoding="utf-8")
+
+    assert store.load().setup_completed is False

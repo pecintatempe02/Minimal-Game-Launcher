@@ -29,6 +29,7 @@ class GameCard(Gtk.FlowBoxChild, SignalOwner):
         "launch-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "details-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "diagnostics-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
+        "wine-tools-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "edit-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "remove-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
     }
@@ -172,7 +173,7 @@ class GameCard(Gtk.FlowBoxChild, SignalOwner):
         content.set_margin_start(6)
         content.set_margin_end(6)
 
-        for label, icon_name, signal, css_class in (
+        items = [
             (
                 "Launch game",
                 "media-playback-start-symbolic",
@@ -191,14 +192,28 @@ class GameCard(Gtk.FlowBoxChild, SignalOwner):
                 "diagnostics-requested",
                 None,
             ),
-            ("Edit game", "document-edit-symbolic", "edit-requested", None),
-            (
-                "Remove from library",
-                "user-trash-symbolic",
-                "remove-requested",
-                "destructive-action",
-            ),
-        ):
+        ]
+        if self.game.platform is Platform.WINDOWS:
+            items.append(
+                (
+                    "Wine tools",
+                    "application-x-executable-symbolic",
+                    "wine-tools-requested",
+                    None,
+                )
+            )
+        items.extend(
+            [
+                ("Edit game", "document-edit-symbolic", "edit-requested", None),
+                (
+                    "Remove from library",
+                    "user-trash-symbolic",
+                    "remove-requested",
+                    "destructive-action",
+                ),
+            ]
+        )
+        for label, icon_name, signal, css_class in items:
             button = Gtk.Button()
             button.add_css_class("flat")
             if css_class:

@@ -38,6 +38,10 @@ from minimal_game_launcher.services.process_identity import (
     read_pidfile,
     verify_process,
 )
+from minimal_game_launcher.services.wine_output import (
+    MAX_CAPTURE_BYTES,
+    analyze_wine_output,
+)
 from minimal_game_launcher.settings import SettingsStore, WineSource
 
 LOGGER = logging.getLogger(__name__)
@@ -50,6 +54,7 @@ _WINE_TIMEOUT = 10.0
 _VULKAN_TIMEOUT = 10.0
 _MAX_OUTPUT = 2000
 _MAX_REGISTRY_READ = 256 * 1024
+_MAX_LAUNCH_LOG_READ = MAX_CAPTURE_BYTES + 64
 _FREE_SPACE_WARNING = 1024**3
 _DXVK_DLLS = ("dxgi.dll", "d3d11.dll", "d3d10core.dll")
 _OVERRIDE_DLLS = frozenset({"d3d9", "d3d10core", "d3d11", "dxgi"})
@@ -192,6 +197,7 @@ class DiagnosticsService:
         pidfiles_root: str | Path | None = None,
         log_path: str | Path | None = None,
         data_directory: str | Path | None = None,
+        launch_logs_root: str | Path | None = None,
         home: str | Path | None = None,
         which: WhichFactory | None = None,
         run: Runner | None = None,
@@ -219,6 +225,11 @@ class DiagnosticsService:
         self._log_path = (
             Path(log_path).expanduser() if log_path is not None else None
         )
+        self._launch_logs_root = (
+            Path(launch_logs_root).expanduser()
+            if launch_logs_root is not None
+            else None
+        )
         self._data_directory = data_root
         self._home = (
             Path(home).expanduser() if home is not None else Path.home()
@@ -245,6 +256,7 @@ class DiagnosticsService:
             ("executable", "Executable", self._check_executable),
             ("working_directory", "Working directory", self._check_working_directory),
             ("process", "Last launch", self._check_process),
+            ("launch_output", "Last launch output", self._check_launch_output),
             ("environment", "Environment", self._check_environment),
             ("log", "Launcher log", self._check_log),
             ("disk", "Disk space", self._check_disk),
@@ -1046,6 +1058,85 @@ class DiagnosticsService:
             status=CheckStatus.INFO,
             summary="The last recorded process is no longer running.",
             details=details,
+        )
+
+    def _check_launch_output(
+        self, game: Game, redact_paths: bool
+    ) -> DiagnosticCheck:
+        """Summarize the bounded Wine output captured during the last launch."""
+        if self._launch_logs_root is None:
+            return DiagnosticCheck(
+                key="launch_output",
+                title="Last launch output",
+                status=CheckStatus.INFO,
+                summary="Launch output capture is not available in this session.",
+            )
+        path = self._launch_logs_root / f"{game.id}.log"
+        if not path.is_file():
+            return DiagnosticCheck(
+                key="launch_output",
+                title="Last launch output",
+                status=CheckStatus.INFO,
+                summary=(
+                    "No launch output has been recorded for this game yet. "
+                    "Wine output is captured on the next launch."
+                ),
+                details=(
+                    "Only the first "
+                    f"{_MAX_LAUNCH_LOG_READ // 1024} KiB are retained.",
+                ),
+            )
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(_MAX_LAUNCH_LOG_READ)
+        except OSError as error:
+            return DiagnosticCheck(
+                key="launch_output",
+                title="Last launch output",
+                status=CheckStatus.WARNING,
+                summary="The recorded launch output could not be read.",
+                details=(self._redact_text(str(error), redact_paths),),
+            )
+
+        text = raw.decode("utf-8", errors="replace")
+        exit_status: int | None = None
+        if text.startswith("exit_status="):
+            header, _, text = text.partition("\n")
+            try:
+                exit_status = int(header.split("=", 1)[1])
+            except ValueError:
+                exit_status = None
+        analysis = analyze_wine_output(text, exit_status=exit_status)
+        details = [
+            f"Captured: {len(raw)} bytes (bounded)",
+            f"Exit status: {exit_status if exit_status is not None else 'unknown'}",
+        ]
+        for finding in analysis.findings:
+            details.append(
+                f"{finding.label}: {finding.confidence} confidence"
+            )
+            details.extend(
+                "  " + self._redact_text(sample, redact_paths)
+                for sample in finding.samples
+            )
+        if analysis.has_problem:
+            status = CheckStatus.PROBLEM
+        elif analysis.has_warning:
+            status = CheckStatus.WARNING
+        elif analysis.findings:
+            status = CheckStatus.INFO
+        else:
+            status = CheckStatus.OK
+        suggestion = None
+        if analysis.findings:
+            suggestion = analysis.findings[0].suggestion
+        return DiagnosticCheck(
+            key="launch_output",
+            title="Last launch output",
+            status=status,
+            summary=analysis.summary,
+            suggestion=suggestion,
+            details=tuple(details),
         )
 
     def _check_environment(

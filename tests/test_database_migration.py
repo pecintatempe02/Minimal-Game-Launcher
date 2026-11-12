@@ -88,6 +88,17 @@ def test_fresh_database_gets_current_schema(tmp_path: Path) -> None:
     assert "wine_prefix_shared" in _columns(path, "games")
     assert "gamescope_resolution" in _columns(path, "games")
     assert "wine_prefix_path" in _columns(path, "installer_sessions")
+    assert {
+        "show_in_library",
+        "display_mode",
+        "virtual_desktop_resolution",
+        "gamescope_enabled",
+        "gamescope_output_resolution",
+        "gamescope_fps_limit",
+        "gamescope_vsync",
+        "gamescope_filter",
+        "gamescope_fullscreen",
+    } <= _columns(path, "games")
 
 
 def test_v5_database_migrates_through_v6(tmp_path: Path) -> None:
@@ -223,3 +234,148 @@ def test_v6_installer_sessions_migrate_as_iso(tmp_path: Path) -> None:
 
     assert _version(path) == SCHEMA_VERSION
     assert "source_kind" in _columns(path, "installer_sessions")
+
+
+_V7_UPGRADES = """
+ALTER TABLE installer_sessions ADD COLUMN source_kind TEXT NOT NULL
+    DEFAULT 'iso' CHECK (source_kind IN ('iso', 'executable'));
+"""
+
+_V8_UPGRADES = """
+ALTER TABLE games ADD COLUMN gamescope_resolution TEXT NOT NULL DEFAULT '';
+"""
+
+
+def _make_v8(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        _V5_SCHEMA.replace("PRAGMA user_version = 5;", "")
+    )
+    connection.executescript(_V6_UPGRADES)
+    connection.executescript(_V7_UPGRADES)
+    connection.executescript(_V8_UPGRADES)
+    connection.execute(
+        "INSERT INTO games (id, name, platform, executable, working_directory, "
+        "gamescope_resolution, created_at, updated_at) VALUES "
+        "('old-1', 'Old', 'windows', 'C:/old.exe', '/tmp', '1024x768', ?, ?)",
+        (NOW, NOW),
+    )
+    connection.execute("PRAGMA user_version = 8")
+    connection.commit()
+    connection.close()
+
+
+def _make_v7(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        _V5_SCHEMA.replace("PRAGMA user_version = 5;", "")
+    )
+    connection.executescript(_V6_UPGRADES)
+    connection.executescript(_V7_UPGRADES)
+    connection.execute(
+        "INSERT INTO games (id, name, platform, executable, working_directory, "
+        "wine_prefix_path, created_at, updated_at) VALUES "
+        "('old-1', 'Old', 'windows', 'C:/old.exe', '/tmp', "
+        "'/prefixes/old-1', ?, ?)",
+        (NOW, NOW),
+    )
+    connection.execute("PRAGMA user_version = 7")
+    connection.commit()
+    connection.close()
+
+
+def test_v7_migrates_through_v8_and_v9(tmp_path: Path) -> None:
+    """The historical v7 path composes both later migrations in order."""
+    path = tmp_path / "v7.db"
+    _make_v7(path)
+
+    database = Database(path)
+    try:
+        game = database.get_game("old-1")
+        assert game is not None
+        assert game.show_in_library is True
+        assert game.display_mode.value == "default"
+        assert game.gamescope_resolution == ""
+        assert game.gamescope_active is False
+        assert game.wine_prefix_path == "/prefixes/old-1"
+        assert game.wine_prefix_shared is False
+    finally:
+        database.close()
+
+    assert _version(path) == SCHEMA_VERSION
+    assert {"show_in_library", "gamescope_resolution"} <= _columns(path, "games")
+
+
+def test_v8_migrates_to_v9_with_legacy_gamescope_behaviour(
+    tmp_path: Path,
+) -> None:
+    """Existing rows stay visible and keep gamescope active via their resolution."""
+    path = tmp_path / "v8.db"
+    _make_v8(path)
+
+    database = Database(path)
+    try:
+        game = database.get_game("old-1")
+        assert game is not None
+        assert game.show_in_library is True
+        assert game.display_mode.value == "default"
+        assert game.virtual_desktop_resolution == ""
+        assert game.gamescope_enabled is False
+        assert game.gamescope_active is True
+        assert game.gamescope_fullscreen is True
+        assert game.gamescope_fps_limit == 0
+        assert game.gamescope_output_resolution == ""
+    finally:
+        database.close()
+
+    assert _version(path) == SCHEMA_VERSION
+    assert "show_in_library" in _columns(path, "games")
+
+
+def test_apply_migration_skips_when_another_process_already_stamped(
+    tmp_path: Path,
+) -> None:
+    """A concurrent migrator that already stamped the version is a no-op."""
+    path = tmp_path / "v8.db"
+    _make_v8(path)
+    database = Database(path)
+    try:
+        # Re-running the v9 DDL would fail with "duplicate column name" if the
+        # version were not re-checked after taking the write lock.
+        database._apply_migration(
+            9,
+            (
+                "ALTER TABLE games ADD COLUMN show_in_library "
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
+        )
+        assert _version(path) == SCHEMA_VERSION
+        assert "show_in_library" in _columns(path, "games")
+    finally:
+        database.close()
+
+
+def test_v9_migration_rolls_back_after_partial_ddl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed v9 keeps user_version 8 and adds none of its columns."""
+    path = tmp_path / "v8.db"
+    _make_v8(path)
+    broken = (
+        (
+            9,
+            (
+                "ALTER TABLE games ADD COLUMN show_in_library "
+                "INTEGER NOT NULL DEFAULT 1 "
+                "CHECK (show_in_library IN (0, 1))",
+                "ALTER TABLE no_such_table ADD COLUMN x INTEGER",
+            ),
+        ),
+    )
+    monkeypatch.setattr(database_module, "_MIGRATIONS", broken)
+
+    with pytest.raises(sqlite3.OperationalError):
+        Database(path)
+
+    assert _version(path) == 8
+    assert "show_in_library" not in _columns(path, "games")

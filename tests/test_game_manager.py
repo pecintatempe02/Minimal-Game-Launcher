@@ -11,7 +11,7 @@ import pytest
 import minimal_game_launcher.services.game_manager as game_manager_module
 from minimal_game_launcher.database import Database, SCHEMA_VERSION
 from minimal_game_launcher.errors import GameValidationError
-from minimal_game_launcher.models import GameDraft, Platform
+from minimal_game_launcher.models import DisplayMode, GameDraft, Platform
 from minimal_game_launcher.services.game_manager import (
     SORT_NAME,
     SORT_RECENT,
@@ -614,3 +614,142 @@ def test_gamescope_resolution_validation_rejects_invalid_input(
             )
         )
     assert manager.list_games() == []
+
+
+def test_hidden_games_are_excluded_from_the_library_and_search(
+    manager: GameManager, make_executable, tmp_path: Path
+) -> None:
+    """Hiding keeps the record and its data but removes it from normal listing."""
+    visible = manager.add_game(
+        _linux_draft("Visible", make_executable("visible"))
+    )
+    hidden = manager.add_game(
+        _linux_draft("Hidden", make_executable("hidden"))
+    )
+
+    updated = manager.set_library_visibility(hidden.id, False)
+
+    assert updated.show_in_library is False
+    assert manager.get_game(hidden.id) == updated
+    assert [game.id for game in manager.list_games()] == [visible.id]
+    assert manager.list_games("Hidden") == []
+    assert [game.id for game in manager.list_hidden_games()] == [hidden.id]
+    assert {game.id for game in manager.list_games(include_hidden=True)} == {
+        visible.id,
+        hidden.id,
+    }
+
+    manager.set_library_visibility(hidden.id, True)
+    assert manager.list_hidden_games() == []
+    assert {game.id for game in manager.list_games()} == {
+        visible.id,
+        hidden.id,
+    }
+
+
+def test_gamescope_controls_persist_and_are_canonicalized(
+    manager: GameManager, tmp_path: Path
+) -> None:
+    """Full gamescope settings are validated, lower-cased, and reloaded."""
+    executable = tmp_path / "game.exe"
+    executable.write_bytes(b"MZ")
+
+    game = manager.add_game(
+        _windows_draft(
+            "Gamescope",
+            executable,
+            gamescope_enabled=True,
+            gamescope_resolution=" 800X600 ",
+            gamescope_output_resolution="1920X1080",
+            gamescope_fps_limit=60,
+            gamescope_vsync="ON",
+            gamescope_filter="FSR",
+            gamescope_fullscreen=False,
+        )
+    )
+
+    stored = manager.get_game(game.id)
+    assert stored is not None
+    assert stored.gamescope_enabled is True
+    assert stored.gamescope_active is True
+    assert stored.gamescope_resolution == "800x600"
+    assert stored.gamescope_output_resolution == "1920x1080"
+    assert stored.gamescope_fps_limit == 60
+    assert stored.gamescope_vsync == "on"
+    assert stored.gamescope_filter == "fsr"
+    assert stored.gamescope_fullscreen is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"gamescope_fps_limit": -1}, "FPS limit"),
+        ({"gamescope_fps_limit": 100000}, "FPS limit"),
+        ({"gamescope_vsync": "maybe"}, "vsync"),
+        ({"gamescope_filter": "sharp"}, "filter"),
+        ({"gamescope_output_resolution": "1920"}, "must look like"),
+    ],
+)
+def test_gamescope_control_validation_rejects_invalid_input(
+    manager: GameManager,
+    tmp_path: Path,
+    overrides: dict,
+    message: str,
+) -> None:
+    """Invalid gamescope values never reach the database."""
+    executable = tmp_path / "invalid.exe"
+    executable.write_bytes(b"MZ")
+
+    with pytest.raises(GameValidationError, match=message):
+        manager.add_game(
+            _windows_draft("Invalid", executable, **overrides)
+        )
+    assert manager.list_games() == []
+
+
+def test_virtual_desktop_requires_windows_and_a_resolution(
+    manager: GameManager, make_executable, tmp_path: Path
+) -> None:
+    """The Wine virtual desktop is Windows-only and needs a size."""
+    linux_executable = make_executable("native")
+    linux = manager.add_game(_linux_draft("Native", linux_executable))
+    windows_executable = tmp_path / "game.exe"
+    windows_executable.write_bytes(b"MZ")
+
+    with pytest.raises(GameValidationError, match="only for Windows"):
+        manager.update_game(
+            linux.id,
+            _linux_draft(
+                "Native",
+                linux_executable,
+                display_mode=DisplayMode.VIRTUAL_DESKTOP,
+                virtual_desktop_resolution="1280x720",
+            ),
+        )
+
+    with pytest.raises(GameValidationError, match="virtual desktop resolution"):
+        manager.add_game(
+            _windows_draft(
+                "No size",
+                windows_executable,
+                display_mode=DisplayMode.VIRTUAL_DESKTOP,
+            )
+        )
+
+    game = manager.add_game(
+        _windows_draft(
+            "Desktop",
+            windows_executable,
+            display_mode=DisplayMode.VIRTUAL_DESKTOP,
+            virtual_desktop_resolution=" 1280X720 ",
+        )
+    )
+    assert game.display_mode is DisplayMode.VIRTUAL_DESKTOP
+    assert game.virtual_desktop_resolution == "1280x720"
+
+    updated = manager.update_game(
+        game.id,
+        _windows_draft("Desktop", windows_executable),
+    )
+    assert updated.display_mode is DisplayMode.DEFAULT
+    assert updated.virtual_desktop_resolution == ""

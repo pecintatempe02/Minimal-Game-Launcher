@@ -53,6 +53,9 @@ from minimal_game_launcher.services.performance_manager import (  # noqa: E402
 from minimal_game_launcher.services.steamgriddb import (  # noqa: E402
     SteamGridDBClient,
 )
+from minimal_game_launcher.services.wine_tools import (  # noqa: E402
+    WineToolsService,
+)
 from minimal_game_launcher.settings import SettingsStore  # noqa: E402
 from minimal_game_launcher.ui.main_window import MainWindow  # noqa: E402
 from minimal_game_launcher.ui.theme import ThemeController  # noqa: E402
@@ -78,6 +81,7 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._steamgriddb: SteamGridDBClient | None = None
         self._diagnostics: DiagnosticsService | None = None
         self._ownership: OwnershipService | None = None
+        self._wine_tools: WineToolsService | None = None
         self._iso_mount: IsoMountService | None = None
         self._installer_manager: InstallerManager | None = None
         self._cleanup: CleanupService | None = None
@@ -137,6 +141,15 @@ class MinimalGameLauncherApplication(Adw.Application):
             pidfiles_root=state_directory() / "processes",
             log_path=log_path(),
             data_directory=data_directory(),
+            launch_logs_root=state_directory() / "launch-logs",
+        )
+        # Winecfg and Winetricks are optional and only start on explicit user
+        # action. They refuse prefixes the launcher does not manage.
+        self._wine_tools = WineToolsService(
+            prefixes_directory(),
+            self._settings_store,
+            ownership=self._ownership,
+            state_root=state_directory(),
         )
         # ISO access is mounted read-only through UDisks. Staging and installer
         # session state are managed separately from the final game directory.
@@ -197,6 +210,10 @@ class MinimalGameLauncherApplication(Adw.Application):
                 raise RuntimeError(
                     "Application started without desktop integration."
                 )
+            if self._wine_tools is None:
+                raise RuntimeError(
+                    "Application started without Wine tool services."
+                )
             self._window = MainWindow(
                 self,
                 self._manager,
@@ -210,6 +227,7 @@ class MinimalGameLauncherApplication(Adw.Application):
                 installer_manager=self._installer_manager,
                 cleanup=self._cleanup,
                 desktop_integration=self._desktop_integration,
+                wine_tools=self._wine_tools,
                 recovered_library=self._recovered_library,
             )
         self._window.present()
@@ -232,6 +250,7 @@ class MinimalGameLauncherApplication(Adw.Application):
         self._installer_manager = None
         self._cleanup = None
         self._desktop_integration = None
+        self._wine_tools = None
         self._performance_manager = None
         if self._database is not None:
             self._database.close()

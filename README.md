@@ -13,11 +13,16 @@ SteamGridDB. It is developed for Arch Linux and Hyprland.
 ## Overview
 
 - **Library**: a responsive grid of cards with cover, platform, and running
-  state. Search (debounced) and sorting by name or recently added.
+  state. Search (debounced) and sorting by name or recently added. Games can be
+  hidden from the normal library without deleting them.
 - **Details**: a read-only view of every stored field, with launch, cover,
-  edit, and remove actions.
+  diagnostics, Wine tools, edit, and remove actions.
 - **Launching**: runs off the GTK thread. Running games are tracked by a
   single main-loop poll that stops when no game is active.
+- **Wine runtime diagnostics**: Windows launch output is captured to a bounded
+  per-game log and summarized on demand.
+- **First run**: a short setup wizard explains the app and records preferences.
+  It installs nothing and starts no service.
 - **Recovery**: a damaged library database is set aside, not deleted, and an
   empty library is created. The window explains what happened.
 
@@ -41,11 +46,15 @@ sudo pacman -S --needed python python-gobject gtk4 libadwaita gdk-pixbuf2 \
 | `wine` | Runs Windows games in per-game prefixes | for Windows games, unless a custom Wine is set |
 | `gamemode` (`gamemoderun`) | Optional GameMode wrapper | optional |
 | `mangohud` | Optional MangoHud overlay | optional |
+| `gamescope` | Optional per-game compositor/upscaler | optional; required only when a game enables it |
+| `winetricks` | Optional component installer for Wine prefixes | optional |
 | `python-pytest` | Test suite | development only |
 
 The launcher does not install Wine, DXVK, VKD3D, .NET, VC++ runtimes,
-GameMode, or MangoHud. Missing optional tools produce a warning, and the game
-still starts.
+GameMode, MangoHud, gamescope, or Winetricks. Missing GameMode or MangoHud
+produces a warning and the game still starts. A game that explicitly enables
+gamescope refuses to start when the binary is missing, because silently
+dropping it would change the display mode.
 
 ## Install on Arch Linux
 
@@ -118,6 +127,10 @@ PYTHONPATH=src python3 -m minimal_game_launcher
 - Optional desktop entry: `$XDG_DATA_HOME/applications/`.
 - Optional desktop icon: `$XDG_DATA_HOME/icons/hicolor/scalable/apps/`.
 - Diagnostic log: `$XDG_STATE_HOME/minigame-launcher/launcher.log`.
+- Per-game launch output:
+  `$XDG_STATE_HOME/minigame-launcher/launch-logs/{game-id}.log`.
+- Wine tool output:
+  `$XDG_STATE_HOME/minigame-launcher/wine-tools/{game-id}.log`.
 - Themes: `$XDG_CONFIG_HOME/Minimalist-Game-Launcher/themes.ini` (optional;
   see [Themes](#themes)).
 
@@ -243,6 +256,12 @@ Use **Add** in the header bar. Each game needs:
 - **Working directory**: defaults to the executable's folder.
 - **Launch arguments**: parsed with `shlex`, no shell.
 - **GameMode** (on by default) and **MangoHud** (off by default).
+- **Display mode**: default, fullscreen, windowed, borderless, or Wine virtual
+  desktop. Only the virtual desktop is enforced; the others are hints.
+- **gamescope** (off by default): render/output resolution, FPS limit, vsync,
+  filter, and fullscreen.
+- **Show in library** (on by default): turning it off hides the game from the
+  grid and search without deleting anything. Restore it from **Hidden games**.
 - **Cover** (optional): see **Covers**.
 
 Removing a game deletes only its library record. Files on disk are untouched.
@@ -259,6 +278,28 @@ Removing a game deletes only its library record. Files on disk are untouched.
   the diagnostic log has details. The game is not started.
 - Wine's global configuration (`~/.wine`) is never modified.
 
+## Wine tools
+
+The game card and details view offer **Wine tools** for Windows games:
+
+- **Winecfg** opens the configuration window for the game's prefix.
+- **Winetricks** runs the verbs you enter after a confirmation. It needs
+  network access and can take several minutes.
+- Only prefixes that MGL manages are accepted. External prefixes are refused,
+  and the game must have been launched once so its prefix exists.
+- The tools run detached with argv lists (`shell=False`); the launcher does not
+  wait. Their output goes to `$XDG_STATE_HOME/minigame-launcher/wine-tools/{game-id}.log`.
+- Nothing is installed automatically.
+
+## Launch output diagnostics
+
+For Windows games, output written while the game runs is captured up to 64 KiB
+and saved to
+`$XDG_STATE_HOME/minigame-launcher/launch-logs/{game-id}.log` after exit.
+**Diagnose** reads that log and reports recognizable Wine problems such as
+missing DLLs, permission errors, prefix failures, and graphics-driver errors.
+Native game output is still discarded.
+
 ## Performance settings
 
 - **GameMode** and **MangoHud** are set per game in the game editor.
@@ -267,6 +308,12 @@ Removing a game deletes only its library record. Files on disk are untouched.
   Windows games use `MANGOHUD=1` in the Wine environment instead.
 - Missing `gamemoderun` or `mangohud` does not stop the game. The launcher
   shows a warning and runs the game without that wrapper.
+- **gamescope** is opt-in per game. When enabled, the wrapper runs outside
+  GameMode/MangoHud with the configured render/output sizes, fullscreen, FPS
+  limit, vsync, and filter. The host display resolution is never changed.
+- **Wine virtual desktop** runs the game through
+  `wine explorer /desktop=MGL-<id8>,<width>x<height>`. The host resolution is
+  not changed.
 - The launcher adds no background service and no daemon. It polls running
   game processes only while at least one game is running, every 500 ms.
 - Cover images are decoded only when their card is built or when a preview is

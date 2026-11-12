@@ -96,11 +96,12 @@ labels above record the state when each entry was written.
 **Verified 2026-11-06**
 
 - Branch: `main`
-- HEAD: `6be412282be75df05b102f2f7c06895e99c6b27d` (`updating .gitignore`)
+- HEAD: `072ee85` (`Preparing for Releases`)
 - Version: `0.5.0`
-- Library schema: v7 (Step 1 added `games.environment`, Step 3 added install/
-  source paths and ownership flags, Step 4 added `installer_sessions`, v7 added
-  `installer_sessions.source_kind`)
+- Library schema: v8 at HEAD (`gamescope_resolution`); the Step 12 working
+  tree adds v9 (visibility, display mode, virtual desktop, full gamescope
+  controls). Earlier steps added `games.environment`, install/source paths and
+  ownership flags, `installer_sessions`, and `installer_sessions.source_kind`.
 - No staged changes, stashes, or tags at baseline.
 - Working tree is clean; Steps 1–11 are committed in `d58ab02` and `3c50f17`.
 - v0.5.0 release preparation changes are described at the end of this file.
@@ -1479,3 +1480,96 @@ dependency, no version bump.
   and GitHub Release assets outside this preparation session.
 - Rebuild the versioned AppImage only after the release commit is reviewed; the
   current AppImage predates the versioned artifact name and checksum output.
+
+---
+
+## Step 12 — v0.6.0 feature set
+
+**Status:** implemented and uncommitted, 2026-11-07.
+
+### Schema and data model
+- `SCHEMA_VERSION` is 9. Fresh databases and the v9 migration add
+  `show_in_library`, `display_mode`, `virtual_desktop_resolution`,
+  `gamescope_enabled`, `gamescope_output_resolution`, `gamescope_fps_limit`,
+  `gamescope_vsync`, `gamescope_filter`, and `gamescope_fullscreen` to
+  `games`, with CHECK constraints.
+- v9 is additive and transactional. Existing rows keep their behaviour:
+  visible, `display_mode = 'default'`, empty virtual desktop, and
+  `gamescope_active` still true when a legacy render resolution exists.
+- `Game.gamescope_active` is `gamescope_enabled or bool(gamescope_resolution)`.
+  This preserves pre-0.6.0 records without a data rewrite.
+
+### Validation and manager paths
+- `GameManager` canonicalizes render/output/virtual-desktop resolutions,
+  rejects out-of-range FPS limits and unknown vsync/filter values, and refuses
+  a virtual desktop for native games or without a resolution.
+- Switching away from `virtual_desktop` clears the stored virtual desktop
+  resolution so it cannot resurface later.
+- `list_games()` excludes hidden rows by default. `list_hidden_games()` and
+  `set_library_visibility()` back the hidden-games manager. Cleanup and orphan
+  detection call the unfiltered path and still see hidden records.
+
+### Launch pipeline
+- Windows-only launch output is captured through `_BoundedCapture` (64 KiB,
+  daemon reader, `stderr=STDOUT`). Native games keep `DEVNULL`.
+- After exit, the launcher writes `<state>/launch-logs/<game-id>.log` with
+  `exit_status=<code>` and analyzes the text. A failure to write the log is
+  logged and never changes the launch result.
+- `services/wine_output.py` recognizes 12 patterns and adds a non-zero-exit
+  finding only when no problem-level finding already exists. Samples are
+  bounded to 200 characters and three lines per pattern.
+- Diagnostics adds a "Last launch output" check between process and
+  environment checks. It never runs a process.
+- Wine virtual desktop composes
+  `wine explorer /desktop=MGL-<id8>,WxH <exe> <args>`.
+- gamescope argv order is `-w/-h`, `-W/-H`, `-f`, `--fps-limit`,
+  `--vsync-enabled`, `-F`, `--`, then the wrapped command. A missing gamescope
+  raises `LaunchError` when the game explicitly enables it.
+
+### Wine tools
+- `services/wine_tools.py` resolves Wine from settings or `PATH` and
+  Winetricks from `PATH` only when an action is requested.
+- The prefix must be MGL-managed and initialized (`OwnershipService` plus the
+  readiness marker). External and uninitialized prefixes are refused with a
+  readable error.
+- Winetricks verbs are limited to 20 names matching
+  `[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}`. Commands are argv lists with
+  `shell=False`, `start_new_session=True`, and a per-game log.
+- `ui/wine_tools_dialog.py` adds Winecfg and a confirmed Winetricks action.
+  Cards and the details dialog expose it only for Windows games.
+
+### UI and settings
+- `ui/hidden_games_dialog.py` lists hidden games with Show and Show all.
+- `ui/setup_wizard.py` has welcome, optional-tools, preferences, and finish
+  steps. It is skippable, detects tools once per page view, and persists
+  `setup_completed`.
+- `SettingsDialog` now uses `dataclasses.replace` on the loaded settings so
+  unrelated saves preserve `setup_completed` and other fields owned by the
+  wizard.
+- `MainWindow` wires the wizard on first run, hidden-games management, and
+  Wine tools from both the card and the details dialog.
+- `application.py` constructs `WineToolsService` with the shared ownership
+  service and state directory, and passes `launch_logs_root` to diagnostics.
+
+### Tests and verification
+- Added or extended tests for the v9 migration and rollback, hidden filtering,
+  gamescope validation and argv, virtual desktop composition, bounded output
+  capture and log writing, Wine output patterns, Wine tools ownership and verb
+  validation, settings round-trip, and wizard persistence.
+- Full suite: **645 passed**, 52 warnings in 62.48 s, no skips.
+- Real GTK smoke run under `dbus-run-session` with isolated `XDG_*`
+  directories: `MainWindow` opened, `SetupWizard` appeared on first run, and
+  the new Wine tools and hidden-games paths were present with no traceback.
+- No real Wine, Winetricks, gamescope, installer, or host display change was
+  performed. No version bump, commit, tag, or Git mutation was made.
+
+### Known limitations
+- Display modes other than the Wine virtual desktop are recorded hints; many
+  games ignore them.
+- gamescope behavior depends on the installed version and the game/driver.
+- Winetricks requires network access, can take minutes, and may fail inside
+  the detached process; MGL only reports the log path.
+- Captured launch output is a bounded prefix (64 KiB), so a root cause printed
+  later can be missing.
+- Hidden games are omitted from the normal library and search by design; use
+  the hidden-games manager to restore them.

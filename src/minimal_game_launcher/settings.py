@@ -41,6 +41,8 @@ class LauncherSettings:
     wine_prefix_strategy: WinePrefixStrategy = WinePrefixStrategy.PER_GAME
     #: ``None`` means no explicit preference: startup must not touch desktop files.
     desktop_entry_enabled: bool | None = None
+    #: Whether the first-run setup wizard has been completed or skipped.
+    setup_completed: bool = False
 
 
 class SettingsStore:
@@ -103,11 +105,14 @@ class SettingsStore:
             LOGGER.warning(
                 "Ignoring invalid desktop entry preference: %r", raw_desktop
             )
+        raw_setup = payload.get("setup_completed", False)
+        setup_completed = raw_setup if isinstance(raw_setup, bool) else False
         return LauncherSettings(
             wine_source=wine_source,
             custom_wine_path=custom_wine_path,
             wine_prefix_strategy=wine_prefix_strategy,
             desktop_entry_enabled=desktop_entry_enabled,
+            setup_completed=setup_completed,
         )
 
     def save(self, settings: LauncherSettings) -> None:
@@ -117,6 +122,7 @@ class SettingsStore:
             "custom_wine_path": settings.custom_wine_path,
             "wine_prefix_strategy": settings.wine_prefix_strategy.value,
             "desktop_entry_enabled": settings.desktop_entry_enabled,
+            "setup_completed": settings.setup_completed,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f"{self.path.name}.tmp")

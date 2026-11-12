@@ -91,12 +91,19 @@ pub enum ScrollTarget {
 pub enum Action {
     // library
     Filter(crate::core::library::Filter),
+    ToggleSidebar,
     OpenSettings,
     AddGame,
     EditGame(String),
     Run(String),
     OpenLogs(String),
     OpenRemove(String),
+    /// Per-game options popover, anchored to the card's settings button.
+    OpenGameMenu {
+        game: String,
+        anchor: Rect,
+    },
+    CloseGameMenu,
     // modal shell
     Close,
     /// Swallow a click on a sheet's own background so it cannot reach the scrim.
@@ -118,6 +125,13 @@ pub enum Action {
     ClearLogs,
     // removal
     ConfirmRemove,
+}
+
+impl Action {
+    /// True for the invisible sheet backdrop that must not steal field clicks.
+    pub fn is_consume(&self) -> bool {
+        matches!(self, Self::Consume)
+    }
 }
 
 /// A clickable rectangle, in draw order. The app tests them back to front.
@@ -388,6 +402,166 @@ impl<'a> Ui<'a> {
                 rect,
                 if on { self.tk.accent } else { self.tk.text },
                 self.tk.surface,
+            );
+        }
+        self.hit(rect, action, true);
+    }
+
+    /// Circular, filled icon button used for the play/stop control on a card.
+    pub fn round_icon_button(&mut self, rect: Rect, icon: Icon, kind: ButtonKind, action: Action) {
+        let hover = self.hovered(rect);
+        let (bg, fg) = match kind {
+            ButtonKind::Default | ButtonKind::DangerText => {
+                if hover {
+                    (self.tk.wash, self.tk.text)
+                } else {
+                    (self.tk.surface2, self.tk.text)
+                }
+            }
+            ButtonKind::Primary => (
+                if hover {
+                    self.tk.accent.fade(0.85)
+                } else {
+                    self.tk.accent
+                },
+                Rgba::rgb(255, 255, 255),
+            ),
+            ButtonKind::Danger => (
+                if hover {
+                    self.tk.danger.fade(0.85)
+                } else {
+                    self.tk.danger
+                },
+                Rgba::rgb(255, 255, 255),
+            ),
+        };
+        if !self.measure {
+            let radius = rect.h * 0.5;
+            self.r.rect(rect.array(), bg, radius);
+            self.r
+                .rect_border(rect.array(), Rgba::TRANSPARENT, radius, 1.0, bg.fade(0.6));
+            self.icon(icon, rect, fg, bg);
+        }
+        self.hit(rect, action, true);
+    }
+
+    /// Sidebar navigation row: a label, an optional icon and an optional count.
+    pub fn nav_item(
+        &mut self,
+        rect: Rect,
+        label: &str,
+        count: Option<usize>,
+        icon: Option<Icon>,
+        on: bool,
+        action: Action,
+    ) {
+        let hover = self.hovered(rect);
+        if !self.measure {
+            if on {
+                self.r.rect(rect.array(), self.tk.wash, RADIUS);
+            } else if hover {
+                self.r.rect(rect.array(), self.tk.surface2, RADIUS);
+            }
+            let fg = if on { self.tk.accent } else { self.tk.text };
+            if on {
+                self.r.rect(
+                    [rect.x, rect.y + 8.0, 3.0, rect.h - 16.0],
+                    self.tk.accent,
+                    1.5,
+                );
+            }
+            let mut text_x = rect.x + 14.0;
+            if let Some(icon) = icon {
+                self.icon(
+                    icon,
+                    Rect::new(rect.x + 12.0, rect.y, 20.0, rect.h),
+                    fg,
+                    self.tk.surface,
+                );
+                text_x = rect.x + 40.0;
+            }
+            let count_w = if count.is_some() { 40.0 } else { 0.0 };
+            self.r.text(
+                self.t,
+                label,
+                Rect::new(
+                    text_x,
+                    rect.y,
+                    (rect.right() - text_x - count_w - 12.0).max(1.0),
+                    rect.h,
+                )
+                .array(),
+                Font::BODY,
+                TEXT_UI,
+                fg,
+            );
+            if let Some(count) = count {
+                self.r.text(
+                    self.t,
+                    &count.to_string(),
+                    Rect::new(rect.right() - count_w - 12.0, rect.y, count_w, rect.h).array(),
+                    Font::BODY,
+                    TEXT_SM,
+                    self.tk.muted,
+                );
+            }
+        }
+        self.hit(rect, action, true);
+    }
+
+    /// Compact sidebar row: a centred initial, used when the sidebar is
+    /// collapsed to an icon rail.
+    pub fn nav_compact(
+        &mut self,
+        rect: Rect,
+        label: &str,
+        count: Option<usize>,
+        on: bool,
+        action: Action,
+    ) {
+        let hover = self.hovered(rect);
+        if !self.measure {
+            if on {
+                self.r.rect(rect.array(), self.tk.wash, RADIUS);
+            } else if hover {
+                self.r.rect(rect.array(), self.tk.surface2, RADIUS);
+            }
+            self.r.text(
+                self.t,
+                label,
+                rect.array(),
+                Font::BODY_BOLD,
+                TEXT_UI,
+                if on { self.tk.accent } else { self.tk.text },
+            );
+            if let Some(count) = count {
+                self.r.text(
+                    self.t,
+                    &count.to_string(),
+                    [rect.x, rect.bottom() - 15.0, rect.w, 13.0],
+                    Font::BODY,
+                    TEXT_XS,
+                    self.tk.muted,
+                );
+            }
+        }
+        self.hit(rect, action, true);
+    }
+
+    /// One row of a popover menu.
+    pub fn menu_item(&mut self, rect: Rect, label: &str, danger: bool, action: Action) {
+        let hover = self.hovered(rect);
+        if !self.measure {
+            if hover {
+                self.r.rect(rect.array(), self.tk.wash, RADIUS);
+            }
+            self.r.text(
+                self.t,
+                label,
+                rect.inset(12.0, 0.0, 12.0, 0.0).array(),
+                Font::BODY,
+                TEXT_UI,
+                if danger { self.tk.danger } else { self.tk.text },
             );
         }
         self.hit(rect, action, true);

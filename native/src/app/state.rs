@@ -136,6 +136,12 @@ pub struct RemoveView {
     pub name: String,
 }
 
+/// Per-game options popover. `anchor` is the settings button that opened it.
+pub struct GameMenu {
+    pub game: String,
+    pub anchor: Rect,
+}
+
 /// A message from a background cover job.
 pub enum CoverDone {
     Loaded {
@@ -158,6 +164,10 @@ pub struct AppState {
     pub filter: Filter,
     pub query: String,
     pub modal: Option<Modal>,
+    /// Open per-game options popover, if any.
+    pub game_menu: Option<GameMenu>,
+    /// Keyboard-selected game, by id. Survives filtering and re-sorting.
+    pub selected: Option<String>,
 
     pub focus: Option<Field>,
     pub caret: usize,
@@ -221,6 +231,8 @@ impl AppState {
             filter: Filter::All,
             query: String::new(),
             modal: None,
+            game_menu: None,
+            selected: None,
             focus: None,
             caret: 0,
             sel_anchor: None,

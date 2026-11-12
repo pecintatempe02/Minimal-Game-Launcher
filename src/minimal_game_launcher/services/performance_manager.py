@@ -16,11 +16,13 @@ the command becomes::
 
     gamemoderun wine <game.exe> <arguments>
 
-Detection is based on ``PATH``. Missing optional tools never prevent a game
-from starting; the launcher falls back to the unwrapped command and returns a
-warning for the UI. MangoHud's Wine overlay additionally depends on 32-bit
-Vulkan layer support, which cannot be verified reliably from ``PATH``. The UI
-describes that limitation rather than promising that the overlay will appear.
+Detection is based on ``PATH``. Missing GameMode or MangoHud never prevents a
+game from starting; the launcher falls back to the unwrapped command and returns
+a warning for the UI. gamescope is different: when a game enables it, a missing
+binary raises ``LaunchError`` rather than silently changing the display mode.
+MangoHud's Wine overlay additionally depends on 32-bit Vulkan layer support,
+which cannot be verified reliably from ``PATH``. The UI describes that limitation
+rather than promising that the overlay will appear.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Callable
 
+from minimal_game_launcher.errors import LaunchError
 from minimal_game_launcher.models import Game, Platform
 
 LOGGER = logging.getLogger(__name__)
@@ -105,12 +108,12 @@ class PerformanceManager:
         """
         current = availability
         if current is None:
-            # Avoid PATH lookups when both optional integrations are disabled.
+            # Avoid PATH lookups when every optional integration is disabled.
             current = (
                 self.detect()
                 if game.gamemode_enabled
                 or game.mangohud_enabled
-                or game.gamescope_resolution
+                or game.gamescope_active
                 else PerformanceAvailability(
                     gamemoderun=None, mangohud=None, gamescope=None
                 )
@@ -172,37 +175,56 @@ class PerformanceManager:
                     "GameMode requested for %s but unavailable", game.name
                 )
 
-        if game.gamescope_resolution:
-            if current.gamescope:
-                # gamescope owns the outermost layer: it runs a private X server
-                # at the game's fixed resolution and upscales that buffer to the
-                # display, so the game never has to change the host mode.
-                width, height = game.gamescope_resolution.split("x", 1)
-                command = [
-                    current.gamescope,
-                    "-f",
-                    "-w",
-                    width,
-                    "-h",
-                    height,
-                    "--",
-                    *command,
-                ]
-                LOGGER.info(
-                    "Upscaling %s from %s with gamescope",
-                    game.name,
-                    game.gamescope_resolution,
+        if game.gamescope_active:
+            if not current.gamescope:
+                # An explicit gamescope request is a launch requirement, not an
+                # optional overlay. Silently dropping it would change the game's
+                # display mode without the user knowing.
+                raise LaunchError(
+                    "gamescope is enabled for this game, but it was not found "
+                    "in PATH. Install gamescope, or disable gamescope for this "
+                    "game."
                 )
-            else:
+            arguments: list[str] = []
+            if game.gamescope_resolution:
+                width, height = game.gamescope_resolution.split("x", 1)
+                arguments.extend(("-w", width, "-h", height))
+            if game.gamescope_output_resolution:
+                width, height = game.gamescope_output_resolution.split("x", 1)
+                arguments.extend(("-W", width, "-H", height))
+            if game.gamescope_fullscreen:
+                arguments.append("-f")
+            if game.gamescope_fps_limit > 0:
+                arguments.extend(
+                    ("--framerate-limit", str(game.gamescope_fps_limit))
+                )
+            if game.gamescope_vsync:
+                # gamescope has no VSync switch in the tested 3.17.0 (and no
+                # ``--vsync-enabled`` option in any release). Passing an
+                # invented flag makes gamescope reject the whole command, so
+                # surface the limitation instead of breaking the launch.
                 warnings.append(
-                    f"This game is set to render at "
-                    f"{game.gamescope_resolution} and be upscaled by "
-                    "gamescope, but gamescope was not found in PATH. The game "
-                    "will launch at its own resolution instead."
+                    "This game requests VSync, but gamescope has no VSync "
+                    "switch. The setting is not applied."
                 )
                 LOGGER.warning(
-                    "gamescope requested for %s but unavailable", game.name
+                    "gamescope VSync requested for %s but unsupported",
+                    game.name,
                 )
+            if game.gamescope_filter:
+                arguments.extend(("-F", game.gamescope_filter))
+            # gamescope owns the outermost layer: it runs a private X server
+            # and scales the game's buffer to the display, so the game never
+            # has to change the host mode.
+            command = [
+                current.gamescope,
+                *arguments,
+                "--",
+                *command,
+            ]
+            LOGGER.info(
+                "Wrapping %s with gamescope (%r)", game.name, arguments
+            )
 
         return PerformancePlan(
             command=tuple(command),

@@ -144,3 +144,95 @@ def test_failed_open_closes_connection(tmp_path: Path, monkeypatch) -> None:
         Database(target)
 
     assert closed == [True]
+
+
+def _locking_connection(original, failures: int) -> type:
+    """Wrap a connection so the first ``failures`` WAL switches report a lock."""
+
+    class LockingConnection:
+        def __init__(self, real) -> None:
+            object.__setattr__(self, "_real", real)
+            object.__setattr__(self, "_failures", failures)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def __setattr__(self, name, value) -> None:
+            if name in {"_real", "_failures"}:
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._real, name, value)
+
+        def execute(self, sql, *args):
+            if sql.strip().upper().startswith("PRAGMA JOURNAL_MODE"):
+                if self._failures > 0:
+                    self._failures -= 1
+                    raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql, *args)
+
+    return LockingConnection
+
+
+def test_transient_wal_lock_is_retried(tmp_path: Path, monkeypatch) -> None:
+    """A concurrent opener briefly holding the lock must not fail the open."""
+    original_connect = sqlite3.connect
+    wrapper = _locking_connection(original_connect, failures=1)
+    attempts: list[str] = []
+
+    def connect(*args, **kwargs):
+        connection = wrapper(original_connect(*args, **kwargs))
+        original_execute = connection.execute
+
+        def counting_execute(sql, *exec_args):
+            if sql.strip().upper().startswith("PRAGMA JOURNAL_MODE"):
+                attempts.append(sql)
+            return original_execute(sql, *exec_args)
+
+        object.__setattr__(connection, "execute", counting_execute)
+        return connection
+
+    monkeypatch.setattr("minimal_game_launcher.database.sqlite3.connect", connect)
+    monkeypatch.setattr("minimal_game_launcher.database.time.sleep", lambda _s: None)
+
+    database = Database(tmp_path / "library.db")
+    try:
+        assert database.list_games() == []
+    finally:
+        database.close()
+
+    assert len(attempts) == 2
+
+
+def test_non_lock_wal_failure_is_not_retried(tmp_path: Path, monkeypatch) -> None:
+    """Real errors (permissions, corruption) must surface immediately."""
+    original_connect = sqlite3.connect
+    attempts: list[str] = []
+
+    class BrokenConnection:
+        def __init__(self, real) -> None:
+            object.__setattr__(self, "_real", real)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def __setattr__(self, name, value) -> None:
+            if name == "_real":
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._real, name, value)
+
+        def execute(self, sql, *args):
+            if sql.strip().upper().startswith("PRAGMA JOURNAL_MODE"):
+                attempts.append(sql)
+                raise sqlite3.OperationalError("unable to open database file")
+            return self._real.execute(sql, *args)
+
+    monkeypatch.setattr(
+        "minimal_game_launcher.database.sqlite3.connect",
+        lambda *a, **k: BrokenConnection(original_connect(*a, **k)),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+        Database(tmp_path / "library.db")
+
+    assert len(attempts) == 1
